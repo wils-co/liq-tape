@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>liq-tape — OI × price quadrant</title>
+<style>
+  :root {
+    --paper: #fbfaf8;
+    --card: #ffffff;
+    --ink: #1c1917;
+    --muted: #78716c;
+    --faint: #a8a29e;
+    --rule: #e7e5e4;
+    --rule-strong: #d6d3d1;
+    --amber: #b45309;
+    --red: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 48px; }
+
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline; justify-content: space-between; }
+  h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 span { color: var(--faint); font-weight: 400; margin-left: 8px; }
+
+  .toggle { display: inline-flex; border: 1px solid var(--rule-strong); border-radius: 8px; overflow: hidden; }
+  .toggle button {
+    appearance: none; border: 0; background: var(--card); color: var(--muted);
+    font: inherit; font-size: 14px; padding: 6px 16px; cursor: pointer;
+    border-right: 1px solid var(--rule-strong);
+  }
+  .toggle button:last-child { border-right: 0; }
+  .toggle button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+  .price { text-align: right; }
+  .price .last { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .badge {
+    display: inline-block; margin-top: 4px; font-size: 12px; letter-spacing: 0.02em;
+    color: var(--muted); border: 1px solid var(--rule-strong); border-radius: 999px; padding: 2px 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .badge.warn { color: var(--amber); border-color: var(--amber); }
+  .badge.bad { color: var(--red); border-color: var(--red); }
+
+  .chips { display: flex; gap: 8px; align-items: center; margin: 22px 0 14px; }
+  .chips .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); margin-right: 4px; }
+  .chips button {
+    appearance: none; background: var(--card); border: 1px solid var(--rule-strong); border-radius: 999px;
+    font: inherit; font-size: 13px; padding: 4px 14px; color: var(--muted); cursor: pointer;
+  }
+  .chips button[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); }
+  .chips .cover { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; margin-left: 2px; }
+  .chips .cover.flag { color: var(--amber); }
+
+  .panel { position: relative; background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 12px; }
+  svg { display: block; width: 100%; max-width: 560px; height: auto; margin: 0 auto; }
+
+  .veil {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(251, 250, 248, 0.88); border-radius: 12px; text-align: center; padding: 24px;
+  }
+  .veil.on { display: flex; }
+  .veil p { margin: 0; color: var(--muted); font-size: 14px; max-width: 30ch; }
+
+  .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; margin-top: 22px; background: var(--rule); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; }
+  .cell { background: var(--card); padding: 12px 14px; }
+  .cell dt { margin: 0 0 3px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+  .cell dd { margin: 0; font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .cell dd.text { font-size: 16px; font-weight: 500; letter-spacing: 0; }
+  .cell dd.flag { color: var(--amber); }
+
+  footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>liq-tape <span>OI × price quadrant</span></h1>
+    <div class="toggle" id="coins" role="group" aria-label="coin">
+      <button type="button" data-coin="BTC" aria-pressed="true">BTC</button>
+      <button type="button" data-coin="ETH" aria-pressed="false">ETH</button>
+    </div>
+    <div class="price">
+      <div class="last" id="last-price">—</div>
+      <span class="badge" id="age-badge">no data</span>
+    </div>
+  </header>
+
+  <div class="chips" id="lookbacks" role="group" aria-label="lookback">
+    <span class="label">lookback</span>
+    <button type="button" data-lb="15m" aria-pressed="false">15m</button>
+    <button type="button" data-lb="1h" aria-pressed="true">1h</button>
+    <button type="button" data-lb="4h" aria-pressed="false">4h</button>
+    <span class="cover" id="cover-note"></span>
+  </div>
+
+  <div class="panel">
+    <svg id="quadrant" viewBox="0 0 560 520" role="img" aria-label="open interest change against price change"></svg>
+    <div class="veil on" id="veil"><p id="veil-text">waiting for data — run sampler.py</p></div>
+  </div>
+
+  <dl class="readout">
+    <div class="cell"><dt>price Δ</dt><dd id="r-price">—</dd></div>
+    <div class="cell"><dt>open interest Δ</dt><dd id="r-oi">—</dd></div>
+    <div class="cell"><dt>regime lens</dt><dd class="text" id="r-regime">—</dd></div>
+    <div class="cell"><dt>samples</dt><dd id="r-count">—</dd></div>
+    <div class="cell"><dt>window covered</dt><dd id="r-cover">—</dd></div>
+  </dl>
+
+  <footer>
+    Read-only instrument panel. Quadrant names are lens text for reading the tape, not instructions —
+    the dot's position is the whole of the information. Data is the local sampler's append-only files.
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var VB_W = 560, VB_H = 520;
+  var PAD_L = 92, PAD_R = 32, PAD_T = 34, PAD_B = 62;
+  var X0 = PAD_L, X1 = VB_W - PAD_R, Y0 = PAD_T, Y1 = VB_H - PAD_B;
+  var CX = (X0 + X1) / 2, CY = (Y0 + Y1) / 2;
+  var HALF_W = (X1 - X0) / 2, HALF_H = (Y1 - Y0) / 2;
+
+  var PRICE_FLOOR = 0.25;   // % — minimum half-width of the x axis
+  var OI_FLOOR = 0.5;       // % — minimum half-height of the y axis
+  var DEADBAND = 0.02;      // % — below this the move is read as flat
+  var FULL_ENOUGH = 0.9;    // ≥90% of the window reads as the whole window
+  var FETCH_TIMEOUT_MS = 15000;
+
+  var state = { coin: "BTC", lookback: "1h" };
+  var timer = null;
+  var generation = 0;       // a response from a superseded coin/lookback is dropped
+  var inflight = null;
+  var busy = false;
+
+  // What the chip asked for is not what arrived. Every label about the plotted
+  // window is driven from this, never from state.lookback alone.
+  var span = { seconds: null, capped: false, full: false };
+
+  var fmtPrice = new Intl.NumberFormat("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  function el(id) { return document.getElementById(id); }
+
+  function niceHalf(value, floor) {
+    var v = Math.max(Math.abs(value || 0) * 1.35, floor);
+    var exp = Math.floor(Math.log10(v));
+    var f = v / Math.pow(10, exp);
+    var step = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+    return step * Math.pow(10, exp);
+  }
+
+  function pct(v, digits) {
+    if (v === null || v === undefined || !isFinite(v)) return "—";
+    var d = digits === undefined ? 2 : digits;
+    return (v >= 0 ? "+" : "") + v.toFixed(d) + "%";
+  }
+
+  // A positive span must never round to "0m" — under 90s it is printed in
+  // seconds, which is exactly the first-run case where coverage matters most.
+  function duration(seconds) {
+    if (seconds === null || seconds === undefined || !isFinite(seconds)) return null;
+    var s = Math.max(0, seconds);
+    if (s < 90) return Math.round(s) + "s";
+    if (s < 5400) return Math.round(s / 60) + "m";
+    return (s / 3600).toFixed(1) + "h";
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
+    });
+  }
+
+  function regimeOf(dx, dy) {
+    if (dx === null || dy === null) return "—";
+    if (Math.abs(dx) < DEADBAND && Math.abs(dy) < DEADBAND) return "flat — no regime yet";
+    if (dy >= 0 && dx >= 0) return "trend  ·  OI↑ P↑";
+    if (dy < 0 && dx >= 0) return "squeeze  ·  OI↓ P↑";
+    if (dy >= 0 && dx < 0) return "fresh shorts  ·  OI↑ P↓";
+    return "long flush  ·  OI↓ P↓";
+  }
+
+  function line(x1, y1, x2, y2, stroke, width, dash) {
+    return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
+      '" stroke="' + stroke + '" stroke-width="' + width + '"' +
+      (dash ? ' stroke-dasharray="' + dash + '"' : "") + ' />';
+  }
+
+  function text(x, y, str, opts) {
+    var o = opts || {};
+    return '<text x="' + x + '" y="' + y + '" fill="' + (o.fill || "#a8a29e") +
+      '" font-size="' + (o.size || 11) + '" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"' +
+      ' text-anchor="' + (o.anchor || "middle") + '"' +
+      (o.weight ? ' font-weight="' + o.weight + '"' : "") +
+      (o.transform ? ' transform="' + o.transform + '"' : "") +
+      '>' + esc(str) + '</text>';
+  }
+
+  function setSpan(data) {
+    var covered = data && typeof data.coverage_seconds === "number" ? data.coverage_seconds : null;
+    var asked = data && typeof data.lookback_seconds === "number" ? data.lookback_seconds : null;
+    span.seconds = covered;
+    span.capped = !!(data && data.capped);
+    span.full = covered !== null && asked ? covered >= asked * FULL_ENOUGH : false;
+  }
+
+  function clearSpan() {
+    span.seconds = null;
+    span.capped = false;
+    span.full = false;
+  }
+
+  // The axis is titled by what the delta was actually measured over. A short
+  // or truncated window says so rather than passing as a full lookback.
+  function spanTitle() {
+    var covered = duration(span.seconds);
+    if (covered === null) return "over " + state.lookback;
+    var title = span.full ? "over " + state.lookback : "over " + covered + " of " + state.lookback;
+    return span.capped ? title + " (truncated)" : title;
+  }
+
+  function renderCoverage() {
+    var cell = el("r-cover");
+    var note = el("cover-note");
+    var covered = duration(span.seconds);
+    cell.className = "";
+    if (covered === null) {
+      cell.textContent = "—";
+      note.textContent = "";
+      note.className = "cover";
+      return;
+    }
+    cell.textContent = covered + " of " + state.lookback + (span.capped ? " · truncated" : "");
+    note.textContent = "· " + covered + " filled" + (span.capped ? " · truncated" : "");
+    cell.className = span.capped ? "flag" : "";
+    note.className = span.capped ? "cover flag" : "cover";
+  }
+
+  function drawQuadrant(dx, dy) {
+    var xMax = niceHalf(dx, PRICE_FLOOR);
+    var yMax = niceHalf(dy, OI_FLOOR);
+    var s = "";
+
+    s += '<rect x="' + X0 + '" y="' + Y0 + '" width="' + (X1 - X0) + '" height="' + (Y1 - Y0) +
+         '" fill="none" stroke="#e7e5e4" stroke-width="1" />';
+
+    s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "#f1efed", 1);
+    s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "#f1efed", 1);
+    s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "#f1efed", 1);
+    s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "#f1efed", 1);
+
+    s += line(X0, CY, X1, CY, "#d6d3d1", 1.25);
+    s += line(CX, Y0, CX, Y1, "#d6d3d1", 1.25);
+
+    var pad = 14;
+    s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "#a8a29e" });
+    s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "#a8a29e" });
+    s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "#a8a29e" });
+    s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "#a8a29e" });
+
+    s += text(CX - HALF_W / 2, Y1 + 18, pct(-xMax / 2, 2), { size: 10 });
+    s += text(CX + HALF_W / 2, Y1 + 18, pct(xMax / 2, 2), { size: 10 });
+    s += text(X1, Y1 + 18, pct(xMax, 2), { size: 10, anchor: "end" });
+    s += text(X0, Y1 + 18, pct(-xMax, 2), { size: 10, anchor: "start" });
+    s += text(X0 - 10, CY - HALF_H / 2 + 4, pct(yMax / 2, 2), { size: 10, anchor: "end" });
+    s += text(X0 - 10, CY + HALF_H / 2 + 4, pct(-yMax / 2, 2), { size: 10, anchor: "end" });
+    s += text(X0 - 10, Y0 + 4, pct(yMax, 2), { size: 10, anchor: "end" });
+    s += text(X0 - 10, Y1 + 4, pct(-yMax, 2), { size: 10, anchor: "end" });
+
+    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "#78716c" });
+    s += text(0, 0, "open interest Δ " + spanTitle(),
+      { size: 12, fill: "#78716c", transform: "translate(26," + CY + ") rotate(-90)" });
+
+    if (dx !== null && dy !== null) {
+      // SVG y grows downward, so a positive OI delta subtracts from CY.
+      var px = CX + Math.max(-1, Math.min(1, dx / xMax)) * HALF_W;
+      var py = CY - Math.max(-1, Math.min(1, dy / yMax)) * HALF_H;
+      s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="#1c1917" opacity="0.08" />';
+      s += '<circle cx="' + px + '" cy="' + py + '" r="6" fill="#1c1917" />';
+      s += line(px, CY, px, py, "#d6d3d1", 1, "2 3");
+      s += line(CX, py, px, py, "#d6d3d1", 1, "2 3");
+    }
+
+    el("quadrant").innerHTML = s;
+  }
+
+  function ageText(seconds) {
+    var d = duration(seconds);
+    return d === null ? "no data" : d + " ago";
+  }
+
+  function setBadge(seconds, note) {
+    var b = el("age-badge");
+    b.className = "badge";
+    if (note) { b.textContent = note; b.classList.add("bad"); return; }
+    if (seconds === null || seconds === undefined) { b.textContent = "no data"; return; }
+    if (seconds > 300) { b.textContent = "STALE · " + ageText(seconds); b.classList.add("bad"); return; }
+    if (seconds > 60) { b.textContent = ageText(seconds); b.classList.add("warn"); return; }
+    b.textContent = ageText(seconds);
+  }
+
+  function setVeil(on, message) {
+    var v = el("veil");
+    if (on) { el("veil-text").textContent = message; v.classList.add("on"); }
+    else { v.classList.remove("on"); }
+  }
+
+  function render(data) {
+    var latest = data.latest;
+    el("last-price").textContent = latest && latest.mark !== null && latest.mark !== undefined
+      ? fmtPrice.format(latest.mark) : "—";
+    setBadge(data.data_age, null);
+
+    var dx = data.delta ? data.delta.mark_pct : null;
+    var dy = data.delta ? data.delta.oi_pct : null;
+    if (dx === undefined) dx = null;
+    if (dy === undefined) dy = null;
+
+    setSpan(data);
+
+    el("r-price").textContent = pct(dx);
+    el("r-oi").textContent = pct(dy);
+    el("r-regime").textContent = regimeOf(dx, dy);
+    el("r-count").textContent = data.count === null || data.count === undefined ? "—" : String(data.count);
+    renderCoverage();
+
+    drawQuadrant(dx, dy);
+
+    if (data.error) {
+      setVeil(true, data.hint || "waiting for data — run sampler.py");
+    } else if (data.data_age !== null && data.data_age > data.lookback_seconds) {
+      setVeil(true, "waiting for data — run sampler.py");
+    } else {
+      setVeil(false, "");
+    }
+  }
+
+  function blank(message) {
+    el("last-price").textContent = "—";
+    el("r-price").textContent = "—";
+    el("r-oi").textContent = "—";
+    el("r-regime").textContent = "—";
+    el("r-count").textContent = "—";
+    clearSpan();
+    renderCoverage();
+    drawQuadrant(null, null);
+    setVeil(true, message);
+  }
+
+  function poll() {
+    // One request at a time. A tick landing on an open request is dropped
+    // rather than cancelling it, so a hung fetch survives to hit its own
+    // timeout instead of being reset every five seconds.
+    if (busy) return;
+    busy = true;
+
+    var mine = generation;
+    var url = "/api/oi/" + encodeURIComponent(state.coin) + "?lookback=" + encodeURIComponent(state.lookback);
+
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    inflight = ctrl;
+
+    // A hung server has to read as unreachable, not as a frozen panel.
+    var timedOut = false;
+    var timeoutId = ctrl
+      ? setTimeout(function () { timedOut = true; ctrl.abort(); }, FETCH_TIMEOUT_MS)
+      : null;
+
+    function settled() {
+      if (timeoutId) clearTimeout(timeoutId);
+      // A superseded response has already had its slot handed to the new
+      // request; it must not clear that request's flags or paint anything.
+      if (mine !== generation) return false;
+      busy = false;
+      inflight = null;
+      return true;
+    }
+
+    fetch(url, { cache: "no-store", signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
+      .then(function (r) {
+        if (!settled()) return;
+        if (!r.ok && r.body && r.body.error === "unknown_coin") {
+          setBadge(null, "no series");
+          blank("no sampler file for " + state.coin + " — run sampler.py");
+          return;
+        }
+        render(r.body);
+      })
+      .catch(function () {
+        if (!settled()) return;
+        setBadge(null, timedOut ? "no response" : "server unreachable");
+        blank(timedOut
+          ? "server not responding — is server.py running?"
+          : "server unreachable — is server.py running?");
+      });
+  }
+
+  function restart() {
+    // Retire the current selection: a slow reply from the previous coin or
+    // lookback must never paint under the new labels.
+    generation++;
+    if (inflight) inflight.abort();
+    inflight = null;
+    busy = false;
+
+    if (timer) clearInterval(timer);
+    clearSpan();
+    renderCoverage();
+    poll();
+    timer = setInterval(poll, 5000);
+  }
+
+  el("coins").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-coin]");
+    if (!btn) return;
+    state.coin = btn.dataset.coin;
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+    restart();
+  });
+
+  el("lookbacks").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-lb]");
+    if (!btn) return;
+    state.lookback = btn.dataset.lb;
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+    restart();
+  });
+
+  drawQuadrant(null, null);
+  restart();
+})();
+</script>
+</body>
+</html>
