@@ -18,6 +18,24 @@
     --green: #15803d;
     --bid-fill: rgba(21, 128, 61, 0.16);
     --ask-fill: rgba(185, 28, 28, 0.14);
+    --veil: rgba(251, 250, 248, 0.88);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #131311;
+      --card: #1c1c1a;
+      --ink: #ece9e4;
+      --muted: #a8a29e;
+      --faint: #6b6764;
+      --rule: #2c2c29;
+      --rule-strong: #3a3a36;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --green: #22c55e;
+      --bid-fill: rgba(34, 197, 94, 0.18);
+      --ask-fill: rgba(239, 68, 68, 0.16);
+      --veil: rgba(19, 19, 17, 0.88);
+    }
   }
   * { box-sizing: border-box; }
   body {
@@ -67,7 +85,7 @@
 
   .veil {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-    background: rgba(251, 250, 248, 0.88); border-radius: 12px; text-align: center; padding: 24px;
+    background: var(--veil); border-radius: 12px; text-align: center; padding: 24px;
   }
   .veil.on { display: flex; }
   .veil p { margin: 0; color: var(--muted); font-size: 14px; max-width: 30ch; }
@@ -126,6 +144,11 @@
 
   #funding { max-width: none; }
 
+  /* ⑥ sits on its own row under the pair: it is price-anchored, so it
+     needs the full width for right-edge labels rather than half of one. */
+  #levels-panel { margin-top: 22px; }
+  #levels { max-width: none; }
+
   footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
 </style>
 </head>
@@ -137,6 +160,8 @@
     <div class="toggle" id="coins" role="group" aria-label="coin">
       <button type="button" data-coin="BTC" aria-pressed="true">BTC</button>
       <button type="button" data-coin="ETH" aria-pressed="false">ETH</button>
+      <button type="button" data-coin="HYPE" aria-pressed="false">HYPE</button>
+      <button type="button" data-coin="SOL" aria-pressed="false">SOL</button>
     </div>
     <div class="price">
       <div class="last" id="last-price">—</div>
@@ -200,11 +225,21 @@
 
   </div>
 
+  <div class="panel" id="levels-panel" hidden>
+    <div class="panel-head">
+      <h2>⑥ structure levels</h2>
+      <span class="note" id="lv-note"></span>
+    </div>
+    <svg id="levels" viewBox="0 0 720 260" role="img"
+         aria-label="hand-maintained structure levels around the last price"></svg>
+  </div>
+
   <footer>
     Read-only instrument panel. Quadrant names are lens text for reading the tape, not instructions —
     the dot's position is the whole of the information. The book is raw depth at a moment, unannotated;
-    funding is the exchange's published hourly rate and premium. Data is the local sampler's
-    append-only files and the official read-only client.
+    funding is the exchange's published hourly rate and premium. The levels are yours, read from
+    <code>levels.yaml</code> and drawn exactly as written — nothing here detects, ranks, or edits
+    them. Data is the local sampler's append-only files and the official read-only client.
   </footer>
 
 </div>
@@ -294,7 +329,7 @@
 
   function text(x, y, str, opts) {
     var o = opts || {};
-    return '<text x="' + x + '" y="' + y + '" fill="' + (o.fill || "#a8a29e") +
+    return '<text x="' + x + '" y="' + y + '" fill="' + (o.fill || "var(--faint)") +
       '" font-size="' + (o.size || 11) + '" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"' +
       ' text-anchor="' + (o.anchor || "middle") + '"' +
       (o.weight ? ' font-weight="' + o.weight + '"' : "") +
@@ -348,21 +383,21 @@
     var s = "";
 
     s += '<rect x="' + X0 + '" y="' + Y0 + '" width="' + (X1 - X0) + '" height="' + (Y1 - Y0) +
-         '" fill="none" stroke="#e7e5e4" stroke-width="1" />';
+         '" fill="none" stroke="var(--rule)" stroke-width="1" />';
 
-    s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "#f1efed", 1);
-    s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "#f1efed", 1);
-    s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "#f1efed", 1);
-    s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "#f1efed", 1);
+    s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "var(--rule)", 1);
+    s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "var(--rule)", 1);
+    s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "var(--rule)", 1);
+    s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "var(--rule)", 1);
 
-    s += line(X0, CY, X1, CY, "#d6d3d1", 1.25);
-    s += line(CX, Y0, CX, Y1, "#d6d3d1", 1.25);
+    s += line(X0, CY, X1, CY, "var(--rule-strong)", 1.25);
+    s += line(CX, Y0, CX, Y1, "var(--rule-strong)", 1.25);
 
     var pad = 14;
-    s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "#a8a29e" });
-    s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "#a8a29e" });
-    s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "#a8a29e" });
-    s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "#a8a29e" });
+    s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "var(--faint)" });
+    s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "var(--faint)" });
+    s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "var(--faint)" });
+    s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "var(--faint)" });
 
     s += text(CX - HALF_W / 2, Y1 + 18, pct(-xMax / 2, 2), { size: 10 });
     s += text(CX + HALF_W / 2, Y1 + 18, pct(xMax / 2, 2), { size: 10 });
@@ -373,18 +408,18 @@
     s += text(X0 - 10, Y0 + 4, pct(yMax, 2), { size: 10, anchor: "end" });
     s += text(X0 - 10, Y1 + 4, pct(-yMax, 2), { size: 10, anchor: "end" });
 
-    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "#78716c" });
+    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "var(--muted)" });
     s += text(0, 0, "open interest Δ " + spanTitle(),
-      { size: 12, fill: "#78716c", transform: "translate(26," + CY + ") rotate(-90)" });
+      { size: 12, fill: "var(--muted)", transform: "translate(26," + CY + ") rotate(-90)" });
 
     if (dx !== null && dy !== null) {
       // SVG y grows downward, so a positive OI delta subtracts from CY.
       var px = CX + Math.max(-1, Math.min(1, dx / xMax)) * HALF_W;
       var py = CY - Math.max(-1, Math.min(1, dy / yMax)) * HALF_H;
-      s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="#1c1917" opacity="0.08" />';
-      s += '<circle cx="' + px + '" cy="' + py + '" r="6" fill="#1c1917" />';
-      s += line(px, CY, px, py, "#d6d3d1", 1, "2 3");
-      s += line(CX, py, px, py, "#d6d3d1", 1, "2 3");
+      s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="var(--ink)" opacity="0.08" />';
+      s += '<circle cx="' + px + '" cy="' + py + '" r="6" fill="var(--ink)" />';
+      s += line(px, CY, px, py, "var(--rule-strong)", 1, "2 3");
+      s += line(CX, py, px, py, "var(--rule-strong)", 1, "2 3");
     }
 
     el("quadrant").innerHTML = s;
@@ -416,6 +451,10 @@
     el("last-price").textContent = latest && latest.mark !== null && latest.mark !== undefined
       ? fmtPrice.format(latest.mark) : "—";
     setBadge(data.data_age, null);
+
+    // ⑥ is anchored on this number, so it is redrawn from the same response.
+    lastMark = latest && typeof latest.mark === "number" ? latest.mark : null;
+    renderLevels();
 
     var dx = data.delta ? data.delta.mark_pct : null;
     var dy = data.delta ? data.delta.oi_pct : null;
@@ -450,6 +489,8 @@
     clearSpan();
     renderCoverage();
     drawQuadrant(null, null);
+    lastMark = null;
+    renderLevels();
     setVeil(true, message);
   }
 
@@ -573,8 +614,8 @@
   }
 
   function bandOf(pct) {
-    if (Math.abs(pct) < FLAT_PCT) return { fill: "#d6d3d1", name: "flat" };
-    return pct > 0 ? { fill: "#15803d", name: "positive" } : { fill: "#b91c1c", name: "negative" };
+    if (Math.abs(pct) < FLAT_PCT) return { fill: "var(--rule-strong)", name: "flat" };
+    return pct > 0 ? { fill: "var(--green)", name: "positive" } : { fill: "var(--red)", name: "negative" };
   }
 
   function renderFunding(data) {
@@ -597,15 +638,15 @@
     var barW = Math.max(2, Math.min(14, step * 0.62));
     var s = "";
 
-    s += line(x0, y0, x0, y1, "#e7e5e4", 1);
-    s += line(x0, zero, x1, zero, "#d6d3d1", 1.25);
+    s += line(x0, y0, x0, y1, "var(--rule)", 1);
+    s += line(x0, zero, x1, zero, "var(--rule-strong)", 1.25);
     s += text(x0 - 8, y0 + 4, fmtRatePct(maxF / 100, 4), { size: 10, anchor: "end" });
     s += text(x0 - 8, zero + 4, "0", { size: 10, anchor: "end" });
     s += text(x0 - 8, y1 + 4, fmtRatePct(-maxF / 100, 4), { size: 10, anchor: "end" });
-    s += text(x0 - 8, y0 - 5, "funding", { size: 9, anchor: "end", fill: "#a8a29e" });
-    s += text(x1 + 8, y0 + 4, fmtRatePct(maxP / 100, 3), { size: 10, anchor: "start", fill: "#a8a29e" });
-    s += text(x1 + 8, y1 + 4, fmtRatePct(-maxP / 100, 3), { size: 10, anchor: "start", fill: "#a8a29e" });
-    s += text(x1 + 8, y0 - 5, "premium", { size: 9, anchor: "start", fill: "#a8a29e" });
+    s += text(x0 - 8, y0 - 5, "funding", { size: 9, anchor: "end", fill: "var(--faint)" });
+    s += text(x1 + 8, y0 + 4, fmtRatePct(maxP / 100, 3), { size: 10, anchor: "start", fill: "var(--faint)" });
+    s += text(x1 + 8, y1 + 4, fmtRatePct(-maxP / 100, 3), { size: 10, anchor: "start", fill: "var(--faint)" });
+    s += text(x1 + 8, y0 - 5, "premium", { size: 9, anchor: "start", fill: "var(--faint)" });
 
     var prem = "";
     for (i = 0; i < rows.length; i++) {
@@ -627,13 +668,13 @@
     }
 
     if (prem) {
-      s += '<polyline points="' + prem + '" fill="none" stroke="#78716c" stroke-width="1.25" ' +
+      s += '<polyline points="' + prem + '" fill="none" stroke="var(--muted)" stroke-width="1.25" ' +
            'stroke-linejoin="round" opacity="0.75" />';
     }
 
     s += text(x0, y1 + 16, clockOf(rows[0].time), { size: 10, anchor: "start" });
     s += text(x1, y1 + 16, clockOf(rows[rows.length - 1].time), { size: 10, anchor: "end" });
-    s += text((x0 + x1) / 2, y1 + 16, "hourly funding · premium line", { size: 10, fill: "#a8a29e" });
+    s += text((x0 + x1) / 2, y1 + 16, "hourly funding · premium line", { size: 10, fill: "var(--faint)" });
 
     el("funding").innerHTML = s;
 
@@ -675,6 +716,178 @@
     var v = el(veilId);
     if (on) { el(textId).textContent = message; v.classList.add("on"); }
     else { v.classList.remove("on"); }
+  }
+
+  // ---- ⑥ structure levels ----------------------------------------------
+
+  // A price-anchored strip, not a second reading of the quadrant. The quadrant
+  // plots OI delta on Y, so a price level drawn across it would be a number on
+  // the wrong axis; this panel carries its own scale, centred on the last
+  // price, and every line in it came out of levels.yaml by hand.
+  var LV = { W: 720, H: 260, L: 56, R: 300, T: 22, B: 22 };
+  var LV_PAD = 1.18;        // headroom beyond the furthest level
+  var LV_FLOOR_PCT = 0.25;  // % — minimum half-range, so close levels separate
+  var LV_GAP = 15;          // px between stacked labels in the viewBox
+
+  var LV_STYLE = {
+    pool:    { stroke: "var(--amber)",       dash: "6 4",   width: 1.25 },
+    base:    { stroke: "var(--rule-strong)", dash: "6 4",   width: 1.25 },
+    session: { stroke: "var(--muted)",       dash: "1.5 4", width: 1 }
+  };
+
+  var levelsData = { coins: null, errors: [] };
+  var lastMark = null;
+
+  // Decimals come from what was written in the file, not from magnitude: two
+  // HYPE levels 0.021 apart must not both round to the same printed price.
+  function levelDecimals(values) {
+    var d = 0;
+    for (var i = 0; i < values.length; i++) {
+      var str = String(values[i]);
+      var dot = str.indexOf(".");
+      if (dot >= 0) d = Math.max(d, Math.min(6, str.length - dot - 1));
+    }
+    return d;
+  }
+
+  function fmtLevel(price, digits) {
+    if (price === null || price === undefined || !isFinite(price)) return "—";
+    return price.toLocaleString("en-AU", {
+      minimumFractionDigits: digits, maximumFractionDigits: digits
+    });
+  }
+
+  function renderLevels() {
+    var panel = el("levels-panel");
+    var svg = el("levels");
+    var byCoin = levelsData.coins;
+    var rows = byCoin && byCoin[state.coin] ? byCoin[state.coin] : [];
+    var errors = levelsData.errors || [];
+
+    // No levels for this coin and nothing unread: draw nothing at all rather
+    // than an empty frame explaining that it is empty.
+    if (!rows.length && !errors.length) {
+      panel.hidden = true;
+      svg.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+
+    var note = el("lv-note");
+    if (errors.length) {
+      var where = errors.map(function (e) { return e.line; }).join(", ");
+      note.textContent = rows.length + " drawn · levels.yaml line " + where + " unread";
+      note.className = "note flag";
+    } else {
+      note.textContent = rows.length + " from levels.yaml";
+      note.className = "note";
+    }
+
+    if (!rows.length) { svg.innerHTML = ""; return; }
+
+    var x0 = LV.L, x1 = LV.W - LV.R, y0 = LV.T, y1 = LV.H - LV.B;
+    var mid = (y0 + y1) / 2, halfH = (y1 - y0) / 2;
+    var i;
+
+    var prices = [];
+    for (i = 0; i < rows.length; i++) prices.push(rows[i].price);
+    var digits = levelDecimals(prices);
+
+    // Centre on the last price so below-price levels sit below the middle and
+    // above-price levels above it. With no price yet, centre on the levels.
+    var priced = lastMark !== null && isFinite(lastMark);
+    var centre = priced ? lastMark : (Math.max.apply(null, prices) + Math.min.apply(null, prices)) / 2;
+
+    var reach = 0;
+    for (i = 0; i < prices.length; i++) reach = Math.max(reach, Math.abs(prices[i] - centre));
+    var half = Math.max(reach * LV_PAD, Math.abs(centre) * LV_FLOOR_PCT / 100);
+    if (!(half > 0)) half = 1;
+
+    function yOf(price) {
+      return mid - Math.max(-1, Math.min(1, (price - centre) / half)) * halfH;
+    }
+
+    // Lines and labels are laid out together: a line stays on its price, but
+    // its label may be nudged so a tight cluster stays readable.
+    var marks = [];
+    for (i = 0; i < rows.length; i++) {
+      marks.push({ price: rows[i].price, label: rows[i].label, kind: rows[i].kind, last: false });
+    }
+    if (priced) marks.push({ price: lastMark, label: "", kind: null, last: true });
+    marks.sort(function (a, b) { return b.price - a.price; });
+
+    for (i = 0; i < marks.length; i++) {
+      marks[i].y = marks[i].last ? mid : yOf(marks[i].price);
+      marks[i].base = marks[i].y + 4;
+    }
+    for (i = 1; i < marks.length; i++) {
+      if (marks[i].base - marks[i - 1].base < LV_GAP) marks[i].base = marks[i - 1].base + LV_GAP;
+    }
+    var spill = marks[marks.length - 1].base - (LV.H - 6);
+    if (spill > 0) for (i = 0; i < marks.length; i++) marks[i].base -= spill;
+    if (marks[0].base < y0 - 4) {
+      var lift = (y0 - 4) - marks[0].base;
+      for (i = 0; i < marks.length; i++) marks[i].base += lift;
+    }
+
+    var s = line(x0, y0, x0, y1, "var(--rule)", 1);
+
+    for (i = 0; i < marks.length; i++) {
+      var m = marks[i];
+      if (m.last) {
+        s += line(x0, m.y, x1, m.y, "var(--ink)", 1.5);
+        s += text(x0 - 8, m.y + 4, "last", { size: 10, anchor: "end", fill: "var(--ink)" });
+      } else {
+        var st = LV_STYLE[m.kind] || LV_STYLE.base;
+        s += line(x0, m.y, x1, m.y, st.stroke, st.width, st.dash);
+        if (priced && lastMark !== 0) {
+          s += text(x0 - 8, m.y + 4, pct((m.price - lastMark) / lastMark * 100, 2),
+            { size: 10, anchor: "end", fill: "var(--faint)" });
+        }
+      }
+
+      // A nudged label gets a leader back to the line it names.
+      if (Math.abs(m.base - (m.y + 4)) > 2) {
+        s += line(x1, m.y, x1 + 10, m.base - 4, "var(--rule-strong)", 1);
+      }
+
+      var caption = fmtLevel(m.price, digits);
+      if (m.last) caption += "  ·  last";
+      else if (m.label) caption += "  ·  " + m.label;
+      s += text(x1 + 14, m.base, caption, {
+        size: 11, anchor: "start",
+        fill: m.last ? "var(--ink)" : "var(--muted)",
+        weight: m.last ? 600 : null
+      });
+    }
+
+    if (!priced) {
+      s += text((x0 + x1) / 2, LV.H - 4, "waiting for price — levels drawn on their own range",
+        { size: 10, fill: "var(--faint)" });
+    }
+
+    svg.innerHTML = s;
+  }
+
+  // Read once per selection. The server parses the file per request, so an
+  // edit to levels.yaml lands on the next refresh with no restart anywhere.
+  function fetchLevels() {
+    var mine = generation;
+    function settle(coins, errors) {
+      if (mine !== generation) return;
+      levelsData = { coins: coins, errors: errors };
+      renderLevels();
+    }
+    fetch("/api/levels", { cache: "no-store" })
+      .then(function (res) {
+        return res.json().then(function (body) { return { ok: res.ok, body: body }; });
+      })
+      .then(function (r) {
+        var body = r.body || {};
+        if (!r.ok || !body.coins) { settle({}, []); return; }
+        settle(body.coins, body.errors || []);
+      })
+      .catch(function () { settle({}, []); });
   }
 
   // One poller per endpoint, all sharing the generation counter so a coin
@@ -790,6 +1003,11 @@
     generation++;
     clearSpan();
     renderCoverage();
+    // The old coin's price must not anchor the new coin's levels, even for
+    // the one poll it would take to be replaced.
+    lastMark = null;
+    renderLevels();
+    fetchLevels();
     oiPoller.restart();
     l2Poller.restart();
     fundingPoller.restart();
