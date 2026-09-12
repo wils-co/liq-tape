@@ -11,7 +11,7 @@ Real-time, read-only liquidity and open interest instrument panel for discretion
 ## Scope (PR1: Foundation Sampler)
 PR1 provides the local background sampler recording BTC and ETH perpetual market contexts (mark price, open interest, funding rate, and premium) into append-only JSONL files.
 
-- Data source: Local client helper (`~/.hermes/skills/blockchain/hyperliquid/scripts/hyperliquid_client.py markets --limit 0 --json`)
+- Data source: the Hyperliquid official info client (`hyperliquid_client.py markets --json`), invoked as a subprocess. Point `--client` at your local copy of the official client.
 - Target files: `data/oi_BTC.jsonl`, `data/oi_ETH.jsonl`
 - Polling cadence: Configurable (default 12s)
 
