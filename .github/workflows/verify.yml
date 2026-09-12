@@ -37,17 +37,26 @@ jobs:
           fail=0
           deny () {
             local why="$1"; shift
-            local out
-            if out=$(grep "$@" 2>/dev/null); then
+            local out rc=0
+            # "|| rc=$?" both captures the status and keeps set -e out of it.
+            # rc 1 is a clean wall; rc 2+ means grep itself failed (bad regex,
+            # missing or unreadable file) and must fail loudly — a renamed file
+            # silently disabling a check is the dishonesty this file exists to
+            # prevent.
+            out=$(grep "$@" 2>/dev/null) || rc=$?
+            if [ "$rc" -eq 0 ]; then
               echo "WALL BREACHED: $why"
               printf '%s\n' "$out" | sed 's/^/    /'
+              fail=1
+            elif [ "$rc" -ge 2 ]; then
+              echo "WALL ERROR (grep rc=$rc): $why"
               fail=1
             fi
           }
 
           # No order path, no reaching into the desk or the harness.
           deny "order path or desk/harness import" \
-            -rnE "Exchange|import harness|import desk" --include="*.py" --include="*.sh" .
+            -rnE "Exchange|\b(from|import)[[:space:]]+(harness|desk)\b" --include="*.py" --include="*.sh" .
 
           # No credentials of any kind in the code that runs. This one has no
           # escape hatch: it passes honestly today, so it stays a real check.
