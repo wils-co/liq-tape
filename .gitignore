@@ -1,0 +1,12 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime data and logs
+data/
+*.log
+*.pid
+
+# Operating system
+.DS_Store
