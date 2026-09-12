@@ -15,9 +15,24 @@ PR1 provides the local background sampler recording perpetual market contexts (m
 - Target files: `data/oi_BTC.jsonl`, `data/oi_ETH.jsonl`, `data/oi_HYPE.jsonl`, `data/oi_SOL.jsonl`
 - Polling cadence: Configurable (default 12s)
 
+## Quickstart
+
+```bash
+./run_sampler.sh start && ./run_board.sh start
+```
+
+Two processes, two commands. The sampler polls and writes `data/`; the board
+serves `http://127.0.0.1:8791` from those files plus the client's live
+endpoints. The quadrant shows an honest empty state until the lookback window
+has filled — roughly 15 minutes of sampling at the default 12s cadence. It does
+not invent numbers to fill the window.
+
+Default coins: BTC, ETH, HYPE, SOL. Change the sampler's set with
+`--coins BTC,ETH` — the board serves whatever coins exist in `data/`.
+
 ## Usage
 
-### Run directly
+### Sampler — run directly
 ```bash
 python3 sampler.py
 ```
@@ -30,11 +45,14 @@ Options:
 
 ### Run as background daemon
 ```bash
-./run_sampler.sh start   # Starts sampler via nohup
-./run_sampler.sh status  # Checks running status
-./run_sampler.sh stop    # Stops background process
-./run_sampler.sh log     # Follows log output
+./run_sampler.sh start   # starts the sampler via nohup
+./run_sampler.sh status  # checks running status
+./run_sampler.sh stop    # stops the background process
+./run_sampler.sh log     # follows log output
 ```
+
+The board has the same interface: `./run_board.sh start|stop|status|restart|log`.
+See Operations below.
 
 ## Scope (PR2: Server + OI x Price quadrant)
 PR2 adds the local dashboard: a stdlib HTTP server over the sampler's JSONL output,
@@ -120,3 +138,30 @@ The page follows the system light/dark setting (`prefers-color-scheme`); every
 colour, including the ones inside the SVG panels, comes from one token set. No
 manual toggle. The header toggle covers BTC, ETH, HYPE and SOL, matching the
 sampler's defaults.
+
+## How it watches
+
+The sampler invokes Hyperliquid's official info client as a subprocess every
+12 seconds and appends the result to `data/oi_<COIN>.jsonl`. The board reads
+those files for the OI quadrants, and calls the same client's live L2 and
+funding endpoints on demand (cached a few seconds between polls), with nothing
+else touching the network. No keys, no orders, no alerts — ever. The doctrine
+up top is not a slogan: the CI workflow in `.github/workflows/verify.yml` is
+the rulebook, executed on every PR. It greps the code for an order path, any
+credential-shaped name, a non-loopback bind, and signal language in the copy;
+if any of those appears, the build fails and the pull request cannot be merged.
+
+## Operations
+
+- **Board daemon:** `./run_board.sh start|stop|status|restart|log`, mirroring
+  `run_sampler.sh`. PID in `board.pid`, log in `data/board.log`. `start`
+  refuses if port 8791 already answers, so a second server can never bind
+  over a first; `stop` cleans up a stale PID file.
+- **Port 8791:** chosen because 8765 belongs to another dashboard on this
+  machine. 8791 is free; if it ever isn't, `python3 server.py --port <n>` takes
+  a different loopback port.
+- **Where data lives:** `data/` (gitignored). `oi_<COIN>.jsonl` is the OI
+  history; the logs sit beside it.
+- **Back it up:** Hyperliquid has no OI-history endpoint. Every hour the
+  sampler records exists nowhere else but on this machine — `data/` is the
+  only copy, and once the disk is gone the history is gone with it.
