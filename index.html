@@ -56,6 +56,8 @@
     font: inherit; font-size: 13px; padding: 4px 14px; color: var(--muted); cursor: pointer;
   }
   .chips button[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); }
+  .chips .cover { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; margin-left: 2px; }
+  .chips .cover.flag { color: var(--amber); }
 
   .panel { position: relative; background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 12px; }
   svg { display: block; width: 100%; max-width: 560px; height: auto; margin: 0 auto; }
@@ -72,6 +74,7 @@
   .cell dt { margin: 0 0 3px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
   .cell dd { margin: 0; font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
   .cell dd.text { font-size: 16px; font-weight: 500; letter-spacing: 0; }
+  .cell dd.flag { color: var(--amber); }
 
   footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
 </style>
@@ -96,11 +99,12 @@
     <button type="button" data-lb="15m" aria-pressed="false">15m</button>
     <button type="button" data-lb="1h" aria-pressed="true">1h</button>
     <button type="button" data-lb="4h" aria-pressed="false">4h</button>
+    <span class="cover" id="cover-note"></span>
   </div>
 
   <div class="panel">
     <svg id="quadrant" viewBox="0 0 560 520" role="img" aria-label="open interest change against price change"></svg>
-    <div class="veil" id="veil"><p id="veil-text">waiting for data — run sampler.py</p></div>
+    <div class="veil on" id="veil"><p id="veil-text">waiting for data — run sampler.py</p></div>
   </div>
 
   <dl class="readout">
@@ -131,9 +135,18 @@
   var PRICE_FLOOR = 0.25;   // % — minimum half-width of the x axis
   var OI_FLOOR = 0.5;       // % — minimum half-height of the y axis
   var DEADBAND = 0.02;      // % — below this the move is read as flat
+  var FULL_ENOUGH = 0.9;    // ≥90% of the window reads as the whole window
+  var FETCH_TIMEOUT_MS = 15000;
 
   var state = { coin: "BTC", lookback: "1h" };
   var timer = null;
+  var generation = 0;       // a response from a superseded coin/lookback is dropped
+  var inflight = null;
+  var busy = false;
+
+  // What the chip asked for is not what arrived. Every label about the plotted
+  // window is driven from this, never from state.lookback alone.
+  var span = { seconds: null, capped: false, full: false };
 
   var fmtPrice = new Intl.NumberFormat("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -151,6 +164,16 @@
     if (v === null || v === undefined || !isFinite(v)) return "—";
     var d = digits === undefined ? 2 : digits;
     return (v >= 0 ? "+" : "") + v.toFixed(d) + "%";
+  }
+
+  // A positive span must never round to "0m" — under 90s it is printed in
+  // seconds, which is exactly the first-run case where coverage matters most.
+  function duration(seconds) {
+    if (seconds === null || seconds === undefined || !isFinite(seconds)) return null;
+    var s = Math.max(0, seconds);
+    if (s < 90) return Math.round(s) + "s";
+    if (s < 5400) return Math.round(s / 60) + "m";
+    return (s / 3600).toFixed(1) + "h";
   }
 
   function esc(s) {
@@ -184,33 +207,68 @@
       '>' + esc(str) + '</text>';
   }
 
+  function setSpan(data) {
+    var covered = data && typeof data.coverage_seconds === "number" ? data.coverage_seconds : null;
+    var asked = data && typeof data.lookback_seconds === "number" ? data.lookback_seconds : null;
+    span.seconds = covered;
+    span.capped = !!(data && data.capped);
+    span.full = covered !== null && asked ? covered >= asked * FULL_ENOUGH : false;
+  }
+
+  function clearSpan() {
+    span.seconds = null;
+    span.capped = false;
+    span.full = false;
+  }
+
+  // The axis is titled by what the delta was actually measured over. A short
+  // or truncated window says so rather than passing as a full lookback.
+  function spanTitle() {
+    var covered = duration(span.seconds);
+    if (covered === null) return "over " + state.lookback;
+    var title = span.full ? "over " + state.lookback : "over " + covered + " of " + state.lookback;
+    return span.capped ? title + " (truncated)" : title;
+  }
+
+  function renderCoverage() {
+    var cell = el("r-cover");
+    var note = el("cover-note");
+    var covered = duration(span.seconds);
+    cell.className = "";
+    if (covered === null) {
+      cell.textContent = "—";
+      note.textContent = "";
+      note.className = "cover";
+      return;
+    }
+    cell.textContent = covered + " of " + state.lookback + (span.capped ? " · truncated" : "");
+    note.textContent = "· " + covered + " filled" + (span.capped ? " · truncated" : "");
+    cell.className = span.capped ? "flag" : "";
+    note.className = span.capped ? "cover flag" : "cover";
+  }
+
   function drawQuadrant(dx, dy) {
     var xMax = niceHalf(dx, PRICE_FLOOR);
     var yMax = niceHalf(dy, OI_FLOOR);
     var s = "";
 
-    // frame
     s += '<rect x="' + X0 + '" y="' + Y0 + '" width="' + (X1 - X0) + '" height="' + (Y1 - Y0) +
          '" fill="none" stroke="#e7e5e4" stroke-width="1" />';
 
-    // half-scale guides
     s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "#f1efed", 1);
     s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "#f1efed", 1);
     s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "#f1efed", 1);
     s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "#f1efed", 1);
 
-    // crosshair
     s += line(X0, CY, X1, CY, "#d6d3d1", 1.25);
     s += line(CX, Y0, CX, Y1, "#d6d3d1", 1.25);
 
-    // corner lens text
     var pad = 14;
     s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "#a8a29e" });
     s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "#a8a29e" });
     s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "#a8a29e" });
     s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "#a8a29e" });
 
-    // axis ticks
     s += text(CX - HALF_W / 2, Y1 + 18, pct(-xMax / 2, 2), { size: 10 });
     s += text(CX + HALF_W / 2, Y1 + 18, pct(xMax / 2, 2), { size: 10 });
     s += text(X1, Y1 + 18, pct(xMax, 2), { size: 10, anchor: "end" });
@@ -220,13 +278,12 @@
     s += text(X0 - 10, Y0 + 4, pct(yMax, 2), { size: 10, anchor: "end" });
     s += text(X0 - 10, Y1 + 4, pct(-yMax, 2), { size: 10, anchor: "end" });
 
-    // axis titles
-    s += text(CX, VB_H - 18, "price Δ over " + state.lookback, { size: 12, fill: "#78716c" });
-    s += text(0, 0, "open interest Δ over " + state.lookback,
+    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "#78716c" });
+    s += text(0, 0, "open interest Δ " + spanTitle(),
       { size: 12, fill: "#78716c", transform: "translate(26," + CY + ") rotate(-90)" });
 
-    // the dot
     if (dx !== null && dy !== null) {
+      // SVG y grows downward, so a positive OI delta subtracts from CY.
       var px = CX + Math.max(-1, Math.min(1, dx / xMax)) * HALF_W;
       var py = CY - Math.max(-1, Math.min(1, dy / yMax)) * HALF_H;
       s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="#1c1917" opacity="0.08" />';
@@ -239,10 +296,8 @@
   }
 
   function ageText(seconds) {
-    if (seconds === null || seconds === undefined) return "no data";
-    if (seconds < 90) return Math.round(seconds) + "s ago";
-    if (seconds < 5400) return Math.round(seconds / 60) + "m ago";
-    return (seconds / 3600).toFixed(1) + "h ago";
+    var d = duration(seconds);
+    return d === null ? "no data" : d + " ago";
   }
 
   function setBadge(seconds, note) {
@@ -272,13 +327,13 @@
     if (dx === undefined) dx = null;
     if (dy === undefined) dy = null;
 
+    setSpan(data);
+
     el("r-price").textContent = pct(dx);
     el("r-oi").textContent = pct(dy);
     el("r-regime").textContent = regimeOf(dx, dy);
     el("r-count").textContent = data.count === null || data.count === undefined ? "—" : String(data.count);
-    el("r-cover").textContent = data.coverage_seconds
-      ? Math.round(data.coverage_seconds / 60) + "m of " + state.lookback
-      : "—";
+    renderCoverage();
 
     drawQuadrant(dx, dy);
 
@@ -297,16 +352,45 @@
     el("r-oi").textContent = "—";
     el("r-regime").textContent = "—";
     el("r-count").textContent = "—";
-    el("r-cover").textContent = "—";
+    clearSpan();
+    renderCoverage();
     drawQuadrant(null, null);
     setVeil(true, message);
   }
 
   function poll() {
+    // One request at a time. A tick landing on an open request is dropped
+    // rather than cancelling it, so a hung fetch survives to hit its own
+    // timeout instead of being reset every five seconds.
+    if (busy) return;
+    busy = true;
+
+    var mine = generation;
     var url = "/api/oi/" + encodeURIComponent(state.coin) + "?lookback=" + encodeURIComponent(state.lookback);
-    fetch(url, { cache: "no-store" })
+
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    inflight = ctrl;
+
+    // A hung server has to read as unreachable, not as a frozen panel.
+    var timedOut = false;
+    var timeoutId = ctrl
+      ? setTimeout(function () { timedOut = true; ctrl.abort(); }, FETCH_TIMEOUT_MS)
+      : null;
+
+    function settled() {
+      if (timeoutId) clearTimeout(timeoutId);
+      // A superseded response has already had its slot handed to the new
+      // request; it must not clear that request's flags or paint anything.
+      if (mine !== generation) return false;
+      busy = false;
+      inflight = null;
+      return true;
+    }
+
+    fetch(url, { cache: "no-store", signal: ctrl ? ctrl.signal : undefined })
       .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
       .then(function (r) {
+        if (!settled()) return;
         if (!r.ok && r.body && r.body.error === "unknown_coin") {
           setBadge(null, "no series");
           blank("no sampler file for " + state.coin + " — run sampler.py");
@@ -315,13 +399,25 @@
         render(r.body);
       })
       .catch(function () {
-        setBadge(null, "server unreachable");
-        blank("server unreachable — is server.py running?");
+        if (!settled()) return;
+        setBadge(null, timedOut ? "no response" : "server unreachable");
+        blank(timedOut
+          ? "server not responding — is server.py running?"
+          : "server unreachable — is server.py running?");
       });
   }
 
   function restart() {
+    // Retire the current selection: a slow reply from the previous coin or
+    // lookback must never paint under the new labels.
+    generation++;
+    if (inflight) inflight.abort();
+    inflight = null;
+    busy = false;
+
     if (timer) clearInterval(timer);
+    clearSpan();
+    renderCoverage();
     poll();
     timer = setInterval(poll, 5000);
   }
