@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 DEFAULT_INTERVAL: float = 12.0
-DEFAULT_COINS: List[str] = ["BTC", "ETH"]
+DEFAULT_COINS: List[str] = ["BTC", "ETH", "HYPE", "SOL"]
 BASE_DIR: Path = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR: Path = BASE_DIR / "data"
 DEFAULT_CLIENT_PATH: Path = (

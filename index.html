@@ -18,6 +18,24 @@
     --green: #15803d;
     --bid-fill: rgba(21, 128, 61, 0.16);
     --ask-fill: rgba(185, 28, 28, 0.14);
+    --veil: rgba(251, 250, 248, 0.88);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #131311;
+      --card: #1c1c1a;
+      --ink: #ece9e4;
+      --muted: #a8a29e;
+      --faint: #6b6764;
+      --rule: #2c2c29;
+      --rule-strong: #3a3a36;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --green: #22c55e;
+      --bid-fill: rgba(34, 197, 94, 0.18);
+      --ask-fill: rgba(239, 68, 68, 0.16);
+      --veil: rgba(19, 19, 17, 0.88);
+    }
   }
   * { box-sizing: border-box; }
   body {
@@ -67,7 +85,7 @@
 
   .veil {
     position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-    background: rgba(251, 250, 248, 0.88); border-radius: 12px; text-align: center; padding: 24px;
+    background: var(--veil); border-radius: 12px; text-align: center; padding: 24px;
   }
   .veil.on { display: flex; }
   .veil p { margin: 0; color: var(--muted); font-size: 14px; max-width: 30ch; }
@@ -137,6 +155,8 @@
     <div class="toggle" id="coins" role="group" aria-label="coin">
       <button type="button" data-coin="BTC" aria-pressed="true">BTC</button>
       <button type="button" data-coin="ETH" aria-pressed="false">ETH</button>
+      <button type="button" data-coin="HYPE" aria-pressed="false">HYPE</button>
+      <button type="button" data-coin="SOL" aria-pressed="false">SOL</button>
     </div>
     <div class="price">
       <div class="last" id="last-price">—</div>
@@ -203,8 +223,7 @@
   <footer>
     Read-only instrument panel. Quadrant names are lens text for reading the tape, not instructions —
     the dot's position is the whole of the information. The book is raw depth at a moment, unannotated;
-    funding is the exchange's published hourly rate and premium. Data is the local sampler's
-    append-only files and the official read-only client.
+    funding is the exchange's published hourly rate and premium. Data is the local sampler's append-only files and the official read-only client.
   </footer>
 
 </div>
@@ -294,7 +313,7 @@
 
   function text(x, y, str, opts) {
     var o = opts || {};
-    return '<text x="' + x + '" y="' + y + '" fill="' + (o.fill || "#a8a29e") +
+    return '<text x="' + x + '" y="' + y + '" fill="' + (o.fill || "var(--faint)") +
       '" font-size="' + (o.size || 11) + '" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"' +
       ' text-anchor="' + (o.anchor || "middle") + '"' +
       (o.weight ? ' font-weight="' + o.weight + '"' : "") +
@@ -348,21 +367,21 @@
     var s = "";
 
     s += '<rect x="' + X0 + '" y="' + Y0 + '" width="' + (X1 - X0) + '" height="' + (Y1 - Y0) +
-         '" fill="none" stroke="#e7e5e4" stroke-width="1" />';
+         '" fill="none" stroke="var(--rule)" stroke-width="1" />';
 
-    s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "#f1efed", 1);
-    s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "#f1efed", 1);
-    s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "#f1efed", 1);
-    s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "#f1efed", 1);
+    s += line(CX - HALF_W / 2, Y0, CX - HALF_W / 2, Y1, "var(--rule)", 1);
+    s += line(CX + HALF_W / 2, Y0, CX + HALF_W / 2, Y1, "var(--rule)", 1);
+    s += line(X0, CY - HALF_H / 2, X1, CY - HALF_H / 2, "var(--rule)", 1);
+    s += line(X0, CY + HALF_H / 2, X1, CY + HALF_H / 2, "var(--rule)", 1);
 
-    s += line(X0, CY, X1, CY, "#d6d3d1", 1.25);
-    s += line(CX, Y0, CX, Y1, "#d6d3d1", 1.25);
+    s += line(X0, CY, X1, CY, "var(--rule-strong)", 1.25);
+    s += line(CX, Y0, CX, Y1, "var(--rule-strong)", 1.25);
 
     var pad = 14;
-    s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "#a8a29e" });
-    s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "#a8a29e" });
-    s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "#a8a29e" });
-    s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "#a8a29e" });
+    s += text(X1 - pad, Y0 + pad + 10, "trend", { anchor: "end", size: 12, fill: "var(--faint)" });
+    s += text(X1 - pad, Y1 - pad, "squeeze", { anchor: "end", size: 12, fill: "var(--faint)" });
+    s += text(X0 + pad, Y0 + pad + 10, "fresh shorts", { anchor: "start", size: 12, fill: "var(--faint)" });
+    s += text(X0 + pad, Y1 - pad, "long flush", { anchor: "start", size: 12, fill: "var(--faint)" });
 
     s += text(CX - HALF_W / 2, Y1 + 18, pct(-xMax / 2, 2), { size: 10 });
     s += text(CX + HALF_W / 2, Y1 + 18, pct(xMax / 2, 2), { size: 10 });
@@ -373,18 +392,18 @@
     s += text(X0 - 10, Y0 + 4, pct(yMax, 2), { size: 10, anchor: "end" });
     s += text(X0 - 10, Y1 + 4, pct(-yMax, 2), { size: 10, anchor: "end" });
 
-    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "#78716c" });
+    s += text(CX, VB_H - 18, "price Δ " + spanTitle(), { size: 12, fill: "var(--muted)" });
     s += text(0, 0, "open interest Δ " + spanTitle(),
-      { size: 12, fill: "#78716c", transform: "translate(26," + CY + ") rotate(-90)" });
+      { size: 12, fill: "var(--muted)", transform: "translate(26," + CY + ") rotate(-90)" });
 
     if (dx !== null && dy !== null) {
       // SVG y grows downward, so a positive OI delta subtracts from CY.
       var px = CX + Math.max(-1, Math.min(1, dx / xMax)) * HALF_W;
       var py = CY - Math.max(-1, Math.min(1, dy / yMax)) * HALF_H;
-      s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="#1c1917" opacity="0.08" />';
-      s += '<circle cx="' + px + '" cy="' + py + '" r="6" fill="#1c1917" />';
-      s += line(px, CY, px, py, "#d6d3d1", 1, "2 3");
-      s += line(CX, py, px, py, "#d6d3d1", 1, "2 3");
+      s += '<circle cx="' + px + '" cy="' + py + '" r="13" fill="var(--ink)" opacity="0.08" />';
+      s += '<circle cx="' + px + '" cy="' + py + '" r="6" fill="var(--ink)" />';
+      s += line(px, CY, px, py, "var(--rule-strong)", 1, "2 3");
+      s += line(CX, py, px, py, "var(--rule-strong)", 1, "2 3");
     }
 
     el("quadrant").innerHTML = s;
@@ -573,8 +592,8 @@
   }
 
   function bandOf(pct) {
-    if (Math.abs(pct) < FLAT_PCT) return { fill: "#d6d3d1", name: "flat" };
-    return pct > 0 ? { fill: "#15803d", name: "positive" } : { fill: "#b91c1c", name: "negative" };
+    if (Math.abs(pct) < FLAT_PCT) return { fill: "var(--rule-strong)", name: "flat" };
+    return pct > 0 ? { fill: "var(--green)", name: "positive" } : { fill: "var(--red)", name: "negative" };
   }
 
   function renderFunding(data) {
@@ -597,15 +616,15 @@
     var barW = Math.max(2, Math.min(14, step * 0.62));
     var s = "";
 
-    s += line(x0, y0, x0, y1, "#e7e5e4", 1);
-    s += line(x0, zero, x1, zero, "#d6d3d1", 1.25);
+    s += line(x0, y0, x0, y1, "var(--rule)", 1);
+    s += line(x0, zero, x1, zero, "var(--rule-strong)", 1.25);
     s += text(x0 - 8, y0 + 4, fmtRatePct(maxF / 100, 4), { size: 10, anchor: "end" });
     s += text(x0 - 8, zero + 4, "0", { size: 10, anchor: "end" });
     s += text(x0 - 8, y1 + 4, fmtRatePct(-maxF / 100, 4), { size: 10, anchor: "end" });
-    s += text(x0 - 8, y0 - 5, "funding", { size: 9, anchor: "end", fill: "#a8a29e" });
-    s += text(x1 + 8, y0 + 4, fmtRatePct(maxP / 100, 3), { size: 10, anchor: "start", fill: "#a8a29e" });
-    s += text(x1 + 8, y1 + 4, fmtRatePct(-maxP / 100, 3), { size: 10, anchor: "start", fill: "#a8a29e" });
-    s += text(x1 + 8, y0 - 5, "premium", { size: 9, anchor: "start", fill: "#a8a29e" });
+    s += text(x0 - 8, y0 - 5, "funding", { size: 9, anchor: "end", fill: "var(--faint)" });
+    s += text(x1 + 8, y0 + 4, fmtRatePct(maxP / 100, 3), { size: 10, anchor: "start", fill: "var(--faint)" });
+    s += text(x1 + 8, y1 + 4, fmtRatePct(-maxP / 100, 3), { size: 10, anchor: "start", fill: "var(--faint)" });
+    s += text(x1 + 8, y0 - 5, "premium", { size: 9, anchor: "start", fill: "var(--faint)" });
 
     var prem = "";
     for (i = 0; i < rows.length; i++) {
@@ -627,13 +646,13 @@
     }
 
     if (prem) {
-      s += '<polyline points="' + prem + '" fill="none" stroke="#78716c" stroke-width="1.25" ' +
+      s += '<polyline points="' + prem + '" fill="none" stroke="var(--muted)" stroke-width="1.25" ' +
            'stroke-linejoin="round" opacity="0.75" />';
     }
 
     s += text(x0, y1 + 16, clockOf(rows[0].time), { size: 10, anchor: "start" });
     s += text(x1, y1 + 16, clockOf(rows[rows.length - 1].time), { size: 10, anchor: "end" });
-    s += text((x0 + x1) / 2, y1 + 16, "hourly funding · premium line", { size: 10, fill: "#a8a29e" });
+    s += text((x0 + x1) / 2, y1 + 16, "hourly funding · premium line", { size: 10, fill: "var(--faint)" });
 
     el("funding").innerHTML = s;
 
