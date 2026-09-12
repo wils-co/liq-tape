@@ -1,0 +1,28 @@
+# Structure levels — human-edited. The dashboard reads this file and draws
+# what is written here. Nothing generates, detects, or rewrites these lines:
+# the levels are Wilson's, and reading them is Wilson's job too.
+#
+# Shape (the only shape the reader understands):
+#
+#   levels:
+#     COIN:
+#       - {price: <number>, label: "<free text>", kind: pool|base|session}
+#
+#   kind: pool    = liquidity target
+#         base    = shelf the price has worked off
+#         session = intraday marker
+#
+# A coin with no entry simply draws nothing. Save the file and refresh the
+# page — the server re-reads it per request, so no restart is needed.
+
+levels:
+  BTC:
+    - {price: 79774, label: "swept pool (Sep 9 highs)", kind: pool}
+    - {price: 76054, label: "swept-reclaimed base (Sep 2 lows)", kind: base}
+    - {price: 74800, label: "pool below", kind: pool}
+  ETH:
+    - {price: 2663, label: "swept pool", kind: pool}
+    - {price: 2500, label: "base", kind: base}
+  HYPE:
+    - {price: 80.108, label: "offer pocket", kind: pool}
+    - {price: 80.087, label: "bid ladder bottom", kind: base}

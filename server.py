@@ -27,6 +27,7 @@ DEFAULT_PORT: int = 8791
 BASE_DIR: Path = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR: Path = BASE_DIR / "data"
 INDEX_FILE: Path = BASE_DIR / "index.html"
+LEVELS_FILE: Path = BASE_DIR / "levels.yaml"
 
 # The official read-only info client, invoked as a subprocess exactly as the
 # sampler does. Same default location, overridable with --client.
@@ -64,6 +65,13 @@ MAX_TAIL_LINES: int = 4000
 API_OI_RE = re.compile(r"^/api/oi/([^/]+)$")
 API_L2_RE = re.compile(r"^/api/l2/([^/]+)$")
 API_FUNDING_RE = re.compile(r"^/api/funding/([^/]+)$")
+
+# levels.yaml is human-edited, so the reader understands one documented
+# subset of YAML and names the line it could not read rather than guessing.
+LEVEL_KINDS: Tuple[str, ...] = ("pool", "base", "session")
+DEFAULT_KIND: str = "base"
+LEVEL_COIN_RE = re.compile(r"^([A-Za-z0-9]{1,16}):$")
+LEVEL_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
 
 
 def read_recent_records(path: Path, cutoff_ts: float) -> Tuple[List[Dict[str, Any]], bool]:
@@ -373,11 +381,219 @@ def build_funding(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
     return payload
 
 
+def _strip_comment(line: str) -> str:
+    """Drop a trailing ``#`` comment, ignoring ``#`` inside a quoted string."""
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
+
+
+def _split_top(text: str, sep: str) -> List[str]:
+    """Split on ``sep`` at quote depth zero, so labels may contain it."""
+    parts: List[str] = []
+    quote = ""
+    buf = ""
+    for ch in text:
+        if quote:
+            buf += ch
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf += ch
+            continue
+        if ch == sep:
+            parts.append(buf)
+            buf = ""
+            continue
+        buf += ch
+    parts.append(buf)
+    return parts
+
+
+def _unquote(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _flow_mapping(body: str) -> Optional[Dict[str, str]]:
+    """Parse ``{price: 1, label: "x", kind: pool}`` into a string mapping."""
+    out: Dict[str, str] = {}
+    for chunk in _split_top(body, ","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        head = _split_top(chunk, ":")
+        if len(head) < 2:
+            return None
+        key = head[0].strip()
+        if not key:
+            return None
+        out[key] = ":".join(head[1:]).strip()
+    return out
+
+
+def _level_entry(fields: Dict[str, str], lineno: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate one parsed entry. Returns ``(level, error)`` — never both."""
+    raw_price = fields.get("price")
+    if raw_price is None:
+        return None, "entry has no price"
+    price = _to_float(_unquote(raw_price))
+    if price is None:
+        return None, f"price {raw_price!r} is not a number"
+
+    kind = _unquote(fields.get("kind", DEFAULT_KIND)) or DEFAULT_KIND
+    if kind not in LEVEL_KINDS:
+        return None, f"kind {kind!r} is not one of {'|'.join(LEVEL_KINDS)}"
+
+    return {
+        "price": price,
+        "label": _unquote(fields.get("label", "")),
+        "kind": kind,
+        "line": lineno,
+    }, None
+
+
+def parse_levels(text: str) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    """Read the documented levels.yaml subset. Returns ``(coins, errors)``.
+
+    Deliberately not a YAML implementation: it understands ``levels:``, one
+    indented coin key per block, and ``- {price: .., label: .., kind: ..}``
+    entries (or the same keys on indented lines under a bare ``-``). Anything
+    it cannot read becomes an error naming the line, so a typo in a
+    hand-edited file is visible rather than a silently missing line.
+    """
+    coins: Dict[str, List[Dict[str, Any]]] = {}
+    errors: List[Dict[str, Any]] = []
+
+    def fail(lineno: int, detail: str) -> None:
+        errors.append({"line": lineno, "detail": detail})
+
+    in_levels = False
+    coin: Optional[str] = None
+    # An open block-style entry: its fields, its line, and the indent of the
+    # "- " that opened it. Continuation lines must be indented past that.
+    pending: Optional[Dict[str, Any]] = None
+
+    def close_pending() -> None:
+        nonlocal pending
+        if pending is None:
+            return
+        level, err = _level_entry(pending["fields"], pending["line"])
+        if err:
+            fail(pending["line"], err)
+        elif pending["coin"] is not None:
+            coins.setdefault(pending["coin"], []).append(level)
+        pending = None
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        body = _strip_comment(raw).rstrip()
+        if not body.strip():
+            continue
+        indent = len(body) - len(body.lstrip())
+        stripped = body.strip()
+
+        if pending is not None and not (indent > pending["indent"] and not stripped.startswith("- ")):
+            close_pending()
+
+        if indent == 0:
+            if stripped == "levels:":
+                in_levels = True
+                coin = None
+            else:
+                fail(lineno, f"ignored top-level line {stripped!r} (expected 'levels:')")
+                in_levels = False
+                coin = None
+            continue
+
+        if not in_levels:
+            fail(lineno, "line sits outside a 'levels:' block")
+            continue
+
+        if stripped.startswith("- "):
+            if coin is None:
+                fail(lineno, "entry before any coin heading")
+                continue
+            rest = stripped[2:].strip()
+            if rest.startswith("{") and rest.endswith("}"):
+                fields = _flow_mapping(rest[1:-1])
+                if fields is None:
+                    fail(lineno, "could not read the {price: .., label: .., kind: ..} entry")
+                    continue
+                level, err = _level_entry(fields, lineno)
+                if err:
+                    fail(lineno, err)
+                else:
+                    coins.setdefault(coin, []).append(level)
+                continue
+            # Block style: this line opens an entry, deeper lines add to it.
+            pending = {"fields": {}, "line": lineno, "indent": indent, "coin": coin}
+            if rest:
+                match = LEVEL_KEY_RE.match(rest)
+                if not match:
+                    fail(lineno, f"could not read {rest!r} as 'key: value'")
+                    pending = None
+                    continue
+                pending["fields"][match.group(1)] = match.group(2).strip()
+            continue
+
+        if pending is not None:
+            match = LEVEL_KEY_RE.match(stripped)
+            if not match:
+                fail(lineno, f"could not read {stripped!r} as 'key: value'")
+                continue
+            pending["fields"][match.group(1)] = match.group(2).strip()
+            continue
+
+        match = LEVEL_COIN_RE.match(stripped)
+        if match:
+            coin = match.group(1).upper()
+            coins.setdefault(coin, [])
+            continue
+
+        fail(lineno, f"could not read {stripped!r} as a coin heading or an entry")
+
+    close_pending()
+
+    # Highest price first: the page draws top-down and reads the same way.
+    for entries in coins.values():
+        entries.sort(key=lambda lvl: lvl["price"], reverse=True)
+    return coins, errors
+
+
+def build_levels(path: Path, now: float) -> Dict[str, Any]:
+    """Assemble the JSON payload for the whole levels file.
+
+    Read per request, never cached: the point of a hand-edited file is that a
+    save plus a refresh is the whole edit loop.
+    """
+    coins, errors = parse_levels(path.read_text(encoding="utf-8"))
+    return {
+        "served_at": round(now, 3),
+        "source": path.name,
+        "kinds": list(LEVEL_KINDS),
+        "coins": coins,
+        "count": sum(len(v) for v in coins.values()),
+        "errors": errors,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "liq-tape"
     sys_version = ""
     data_dir: Path = DEFAULT_DATA_DIR
     client_path: Path = DEFAULT_CLIENT_PATH
+    levels_file: Path = LEVELS_FILE
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         parsed = urlparse(self.path)
@@ -389,6 +605,10 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
+            return
+
+        if route == "/api/levels":
+            self._send_levels()
             return
 
         match = API_OI_RE.match(route)
@@ -423,6 +643,36 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_levels(self) -> None:
+        """Serve the hand-edited levels file. This endpoint only ever reads."""
+        if not self.levels_file.is_file():
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {
+                    "error": "no_levels_file",
+                    "expected": str(self.levels_file),
+                    "hint": "no levels.yaml — create one to draw your levels",
+                },
+            )
+            return
+
+        try:
+            payload = build_levels(self.levels_file, time.time())
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "detail": str(exc)},
+            )
+            return
+        except UnicodeDecodeError:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "detail": "levels.yaml is not UTF-8 text"},
+            )
+            return
+
+        self._send_json(HTTPStatus.OK, payload)
 
     def _resolve_coin(self, raw_coin: str) -> Optional[str]:
         """Return the tracked coin for this path segment, or None (404 sent).
@@ -564,6 +814,12 @@ def parse_args() -> argparse.Namespace:
         help=f"Directory holding oi_<COIN>.jsonl (default: {DEFAULT_DATA_DIR})",
     )
     parser.add_argument(
+        "--levels",
+        type=str,
+        default=str(LEVELS_FILE),
+        help=f"Path to the hand-edited levels file (default: {LEVELS_FILE})",
+    )
+    parser.add_argument(
         "--client",
         type=str,
         default=str(DEFAULT_CLIENT_PATH),
@@ -576,6 +832,7 @@ def main() -> None:
     args = parse_args()
     Handler.data_dir = Path(args.data_dir).resolve()
     Handler.client_path = Path(args.client).resolve()
+    Handler.levels_file = Path(args.levels).resolve()
 
     if not Handler.client_path.is_file():
         # Not fatal: the OI panel reads files only. The client-backed panels
