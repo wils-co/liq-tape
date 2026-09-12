@@ -1,0 +1,126 @@
+# The doctrine walls, run by a machine. Every wall here was previously a thing
+# a reviewer had to remember to check; PR4 merged without review on 2026-09-12
+# and nothing caught it, because the gate was a person.
+#
+# Stdlib-only project, so this costs nothing to run: no pip install, no
+# requirements, no third-party actions beyond checkout and setup-python.
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read the code, report a status. Nothing here needs more than that.
+permissions:
+  contents: read
+
+jobs:
+  walls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Doctrine walls
+        run: |
+          set -euo pipefail
+
+          # NOT "! grep ...": bash never applies set -e to a negated command,
+          # so a wall written that way passes whether or not it finds anything.
+          # deny() checks the exit status itself, prints what it found, and
+          # keeps going so one run reports every violation rather than the
+          # first.
+          fail=0
+          deny () {
+            local why="$1"; shift
+            local out
+            if out=$(grep "$@" 2>/dev/null); then
+              echo "WALL BREACHED: $why"
+              printf '%s\n' "$out" | sed 's/^/    /'
+              fail=1
+            fi
+          }
+
+          # No order path, no reaching into the desk or the harness.
+          deny "order path or desk/harness import" \
+            -rnE "Exchange|import harness|import desk" --include="*.py" --include="*.sh" .
+
+          # No credentials of any kind in the code that runs. This one has no
+          # escape hatch: it passes honestly today, so it stays a real check.
+          deny "credential-shaped name in code" \
+            -rniE "api[_-]?key|secret|password|token" --include="*.py" --include="*.sh" .
+
+          # Loopback only.
+          deny "non-loopback bind" -rnE "0\.0\.0\.0" --include="*.py" .
+
+          # Signal language. Only these two words are grepped across the page
+          # and the README: every other banned word has a legitimate non-copy
+          # use here today (AbortController.signal, the "long flush" lens text,
+          # a "short" local), so grepping them would need an escape hatch, and
+          # an always-passing check is worse than an honest narrow one.
+          deny "signal language in copy" \
+            -rinE "support|resistance" index.html README.md levels.yaml
+
+          # levels.yaml is pure data with no prose and no code, so the whole
+          # banned vocabulary applies to it without exception.
+          deny "signal language in levels.yaml" \
+            -rinE "\b(buy|sell|long|short|signal|alert|support|resistance)\b" levels.yaml
+
+          # Every colour comes from the token set, so dark mode cannot regress.
+          deny "hardcoded colour in the SVG panels" \
+            -nE 'fill="#[0-9a-fA-F]{3,8}"|stroke="#[0-9a-fA-F]{3,8}"' index.html
+
+          # One self-contained page: no CDN, no external asset, works offline.
+          deny "external asset reference" -nE '(src|href)="(https?:)?//' index.html
+
+          # The server never writes a file. This is what keeps levels.yaml
+          # human-edited: there is no write path for anything to reach it.
+          deny "server writes to disk" -nE 'write_text|open\([^)]*"[wax]' server.py
+          deny "server writes to disk" -nE "write_text|open\([^)]*'[wax]" server.py
+
+          # The sampler has no business touching the levels file either.
+          deny "sampler touching the levels file" -in "levels" sampler.py run_sampler.sh
+
+          if [ "$fail" -ne 0 ]; then
+            echo "walls: FAILED"
+            exit 1
+          fi
+          echo "walls: clean"
+
+      - name: Syntax gates
+        run: |
+          set -euo pipefail
+          python3 -m py_compile sampler.py server.py scripts/check_levels.py
+          bash -n run_sampler.sh
+          echo "syntax: clean"
+
+      - name: Levels file reads
+        run: python3 scripts/check_levels.py
+
+      - name: Server smoke test
+        run: |
+          set -euo pipefail
+
+          # No data/ dir (gitignored) and no official client on the runner:
+          # exactly the state a fresh clone is in, and both paths must serve.
+          python3 server.py --port 8791 --client /nonexistent/client.py &
+          SPID=$!
+          trap 'kill $SPID 2>/dev/null || true' EXIT
+          sleep 3
+
+          curl -sf -o /dev/null http://127.0.0.1:8791/
+          curl -sf -o "$RUNNER_TEMP/levels.json" http://127.0.0.1:8791/api/levels
+
+          # One line on purpose: inside a YAML block scalar every line carries
+          # the block's indentation, which a multi-line python -c would read as
+          # an indentation error.
+          python3 -c "import json,sys; d=json.load(sys.stdin); assert not d['errors'], d['errors']; assert d['count'] > 0, 'no levels served'; print('levels endpoint:', d['count'], 'levels')" < "$RUNNER_TEMP/levels.json"
+
+          # An untracked coin is a 404, not a fabricated empty panel.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/oi/DOGE)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/nope)" = 404
+          echo "smoke: clean"
