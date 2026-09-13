@@ -162,8 +162,8 @@ the OI cadence past one timeout.
 
 `GET /api/prints/<COIN>?lookback=15m|1h|4h&min_notional=<usd>` (default `1h` /
 `$25,000`) reads that file, aggregates fills that share a taker-order
-`hash` (sum `sz`, size-weighted `px`) *before* the notional filter, and
-tags prints within 0.15% of a `levels.yaml` entry. Cap 200 with an honest
+`hash` and side (sum `sz`, size-weighted `px`) *before* the notional
+filter, and tags prints within 0.15% of a `levels.yaml` entry. Cap 200 with an honest
 `truncated` flag; `window_capped` is set when the file tail cap cut the
 window short. A missing trades file is an empty list with a note, not a
 404 — the sampler may be older than the board. Side is `B` or `A`

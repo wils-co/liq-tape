@@ -646,13 +646,21 @@ def _usable_order_hash(rec: Dict[str, Any]) -> Optional[str]:
 
 
 def _grouped_fills(records: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """Group in-window fills that share a usable taker-order hash."""
+    """Group in-window fills that share a usable taker-order hash and side.
+
+    One Hyperliquid action can carry both sides. Hash-only grouping would
+    fuse a bid-taker fill and an ask-taker fill into one print at an
+    average price — inventing a sweep that did not happen. A sweep is
+    one-sided; mixed batches split.
+    """
     groups: Dict[Any, List[Dict[str, Any]]] = {}
     order: List[Any] = []
     for rec in records:
-        key: Any = _usable_order_hash(rec)
-        if key is None:
-            key = ("tid", rec["tid"])
+        digest = _usable_order_hash(rec)
+        if digest is None:
+            key: Any = ("tid", rec["tid"])
+        else:
+            key = (digest, rec.get("side"))
         if key not in groups:
             order.append(key)
             groups[key] = []
