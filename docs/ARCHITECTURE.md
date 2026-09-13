@@ -18,11 +18,12 @@ Hyperliquid official client (subprocess, --json)
 
 Invokes the official info client as a subprocess on a fixed cadence (default
 12s) and appends one JSON line per coin per poll to `data/oi_<COIN>.jsonl`.
-After that write, it fetches `recentTrades` for the same coin and appends
-new rows (deduped on `tid`) to `data/trades_<COIN>.jsonl`. A failed trades
-poll never skips the OI write. No network stack in-repo; the client is a
-local file pointed at by `--client`. This file is the only writer in the
-project.
+After every OI write of the tick, it fetches `recentTrades` for those coins
+concurrently and appends new rows (deduped on `tid`, without the `users`
+address pair) to `data/trades_<COIN>.jsonl`. A failed or slow trades poll
+never skips the OI write and cannot stretch the OI cadence past one trades
+timeout. No network stack in-repo; the client is a local file pointed at by
+`--client`. This file is the only writer in the project.
 
 ## server.py
 
@@ -63,7 +64,8 @@ The panels show what actually happened instead of a prettier picture:
 
 - **Capped flag** — when a file is truncated or only partially covers the
   lookback, the panel is marked so a short window is never mistaken for a
-  full one.
+  full one. Prints add `window_capped` when the trades-file line cap is
+  what cut the window short, and OR that into `truncated`.
 - **Veil** — on first paint and on empty data, the panel is covered with a
   "waiting" state rather than blank space or invented values.
 - **Data-age badges** — age turns amber past 60s and `STALE` past 300s, so a

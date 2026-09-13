@@ -155,15 +155,20 @@ strings and are converted to floats before they leave the server.
 ### Notable prints
 The sampler now also polls `recentTrades` (last ~10 prints, not a full tape)
 on the same 12s cadence and appends new rows to `data/trades_<COIN>.jsonl`,
-deduped on `tid`. A restart resumes the watermark from the file tail; a
-failed trades poll never skips the OI write.
+deduped on `tid`, without the `users` address pair. A restart resumes the
+watermark from the file tail. Trades fetches for the tracked coins run
+concurrently after the OI writes, so a hung trades endpoint cannot stretch
+the OI cadence past one timeout.
 
 `GET /api/prints/<COIN>?lookback=15m|1h|4h&min_notional=<usd>` (default `1h` /
-`$25,000`) reads that file, filters by window and notional, and tags prints
-within 0.15% of a `levels.yaml` entry. Cap 200 with an honest `truncated`
-flag. A missing trades file is an empty list with a note, not a 404 — the
-sampler may be older than the board. Side is `B` or `A` (bid-taker /
-ask-taker); the page does not relabel it.
+`$25,000`) reads that file, aggregates fills that share a taker-order
+`hash` (sum `sz`, size-weighted `px`) *before* the notional filter, and
+tags prints within 0.15% of a `levels.yaml` entry. Cap 200 with an honest
+`truncated` flag; `window_capped` is set when the file tail cap cut the
+window short. A missing trades file is an empty list with a note, not a
+404 — the sampler may be older than the board. Side is `B` or `A`
+(bid-taker / ask-taker); the page does not relabel it. Panel ⑦ labels
+the prints readout `prints · 1h` — that window is not the profile chip.
 
 ### Panel ⑦
 Full-width histogram under the levels strip: volume-at-price bars, VWAP line,

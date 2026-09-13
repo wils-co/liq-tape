@@ -106,6 +106,7 @@
   .panel-head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.01em; color: var(--ink); }
   .panel-head .note { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; text-align: right; }
   .panel-head .note.flag { color: var(--amber); }
+  .panel-head .note.bad { color: var(--red); }
 
   /* L2 ladder: asks above, bids below, one row per level. Rows are built once
      and only their text and bar widths change, so a re-scale never reflows. */
@@ -253,7 +254,7 @@
          aria-label="volume at price with session VWAP and notable prints"></svg>
     <dl class="mini">
       <div><dt>session VWAP</dt><dd id="pf-vwap">—</dd></div>
-      <div><dt>prints</dt><dd id="pf-prints">—</dd></div>
+      <div><dt>prints · 1h</dt><dd id="pf-prints">—</dd></div>
       <div><dt>window</dt><dd id="pf-window">—</dd></div>
     </dl>
     <div class="veil on" id="pf-veil"><p id="pf-veil-text">waiting for 15m candles</p></div>
@@ -986,6 +987,7 @@
     }
 
     var rows = prints && prints.prints ? prints.prints : [];
+    var nearYs = [];
     for (i = 0; i < rows.length; i++) {
       var p = rows[i];
       if (typeof p.px !== "number" || !isFinite(p.px)) continue;
@@ -995,9 +997,13 @@
       s += line(x0 - 7, py, x0, py, col, 1.5);
       s += '<circle cx="' + x0 + '" cy="' + py.toFixed(2) + '" r="2.2" fill="' + col + '" />';
       if (p.near && p.near.length) {
-        s += text(x1 + 10, py + 4, p.near.join(" · "), {
-          size: 10, anchor: "start", fill: "var(--muted)"
-        });
+        var clash = nearYs.some(function (y) { return Math.abs(py - y) < 12; });
+        if (!clash) {
+          s += text(x1 + 10, py + 4, p.near.join(" · "), {
+            size: 10, anchor: "start", fill: "var(--muted)"
+          });
+          nearYs.push(py);
+        }
       }
     }
 
@@ -1011,9 +1017,16 @@
 
     el("pf-vwap").textContent = typeof profile.vwap === "number" ? fmtPx(profile.vwap) : "—";
     var nPrints = prints && typeof prints.count === "number" ? prints.count : 0;
-    var printLabel = nPrints === 0
-      ? (prints && prints.note ? "none yet" : "—")
-      : String(nPrints) + (prints && prints.truncated ? " · truncated" : "");
+    var printsError = !!(prints && prints.error);
+    var printLabel;
+    if (printsError) {
+      printLabel = "unavailable";
+    } else if (nPrints === 0) {
+      printLabel = (prints && prints.note) ? "none yet" : "—";
+    } else {
+      printLabel = String(nPrints);
+      if (prints && (prints.truncated || prints.window_capped)) printLabel += " · truncated";
+    }
     el("pf-prints").textContent = printLabel;
     el("pf-window").textContent = profile.lookback || state.profileLookback;
 
@@ -1021,10 +1034,19 @@
     var age = typeof profile.served_at === "number" ? (Date.now() / 1000) - profile.served_at : null;
     var parts = [buckets.length + " buckets"];
     if (age !== null && isFinite(age)) parts.push(ageText(age));
-    if (prints && prints.truncated) parts.push("prints truncated");
-    if (prints && prints.note && nPrints === 0) parts.push("prints accumulating");
+    if (printsError) {
+      parts.push("prints unavailable (error)");
+    } else if (prints && prints.window_capped) {
+      parts.push("prints window capped");
+    } else if (prints && prints.truncated) {
+      parts.push("prints truncated");
+    } else if (prints && prints.note && nPrints === 0) {
+      parts.push("prints accumulating");
+    }
     note.textContent = parts.join(" · ");
-    note.className = (prints && prints.truncated) ? "note flag" : "note";
+    note.className = printsError
+      ? "note bad"
+      : (prints && (prints.truncated || prints.window_capped) ? "note flag" : "note");
 
     setPanelVeil("pf-veil", "pf-veil-text", false, "");
   }
@@ -1178,11 +1200,13 @@
       return "/api/prints/" + encodeURIComponent(state.coin) + "?lookback=1h&min_notional=25000";
     },
     onData: function (ok, body) {
-      printsData = ok && body ? body : { prints: [], count: 0, note: "prints need the sampler to accumulate — full picture in ~24h" };
+      printsData = ok && body
+        ? body
+        : { prints: [], count: 0, error: true };
       if (profileData && !profileData.error) paintProfile();
     },
     onFail: function () {
-      printsData = { prints: [], count: 0, note: "prints need the sampler to accumulate — full picture in ~24h" };
+      printsData = { prints: [], count: 0, error: true };
       if (profileData && !profileData.error) paintProfile();
     }
   });

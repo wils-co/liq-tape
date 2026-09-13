@@ -8,6 +8,7 @@ Read-only: no order execution, no credentials, no signal generation.
 
 import argparse
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
 import json
 import os
@@ -16,7 +17,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Deque, Dict, List, Optional, Set
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 DEFAULT_INTERVAL: float = 12.0
 DEFAULT_COINS: List[str] = ["BTC", "ETH", "HYPE", "SOL"]
@@ -28,6 +29,9 @@ DEFAULT_DATA_DIR: Path = BASE_DIR / "data"
 TID_CAP: int = 2000
 TID_TAIL_BYTES: int = 256 * 1024
 TRADES_TIMEOUT: float = 8.0
+# Fields the panel actually reads. `users` is ~40% of each row and nothing
+# consumes it; existing files keep old rows, this is append-forward.
+TRADE_FIELDS: Tuple[str, ...] = ("coin", "side", "px", "sz", "time", "hash", "tid")
 DEFAULT_CLIENT_PATH: Path = (
     Path.home()
     / ".hermes"
@@ -129,6 +133,40 @@ def load_tid_gate(path: Path) -> TidGate:
         if tid is not None:
             gate.add(tid)
     return gate
+
+
+def slim_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the fields the board reads. Drop ``users`` and anything else extra."""
+    return {key: trade[key] for key in TRADE_FIELDS if key in trade}
+
+
+def fetch_trades_for_coins(
+    client_path: Path, coins: List[str]
+) -> Dict[str, Tuple[Optional[List[Dict[str, Any]]], Optional[Exception]]]:
+    """Fetch recent trades for each coin concurrently.
+
+    Wall-clock wait is one timeout, not N sequential timeouts, so a slow
+    or hung trades endpoint cannot stretch the OI cadence past one
+    ``TRADES_TIMEOUT``. A failed coin is ``(None, exc)`` and does not
+    prevent the others from returning.
+    """
+    out: Dict[str, Tuple[Optional[List[Dict[str, Any]]], Optional[Exception]]] = {
+        coin: (None, None) for coin in coins
+    }
+    if not coins:
+        return out
+    workers = min(len(coins), 8)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {
+            pool.submit(fetch_recent_trades, client_path, coin): coin for coin in coins
+        }
+        for fut in as_completed(futs):
+            coin = futs[fut]
+            try:
+                out[coin] = (fut.result(), None)
+            except Exception as exc:
+                out[coin] = (None, exc)
+    return out
 
 
 def fetch_recent_trades(client_path: Path, coin: str) -> List[Dict[str, Any]]:
@@ -248,6 +286,7 @@ def main() -> None:
             }
             sample_ts = round(time.time(), 3)
 
+            written: List[str] = []
             for coin in coins:
                 m = lookup.get(coin)
                 if not m:
@@ -270,29 +309,33 @@ def main() -> None:
                 line = json.dumps(record) + "\n"
                 with open(target_file, "a", encoding="utf-8") as f:
                     f.write(line)
+                written.append(coin)
 
-                # A failed trades poll must never skip the OI write above.
-                try:
-                    trades = fetch_recent_trades(client_path, coin)
-                    gate = tid_gates[coin]
-                    new_lines: List[str] = []
-                    for trade in trades:
-                        tid = _trade_tid(trade)
-                        if tid is None:
-                            continue
-                        if gate.add(tid):
-                            new_lines.append(json.dumps(trade) + "\n")
-                    if new_lines:
-                        with open(
-                            data_dir / f"trades_{coin}.jsonl", "a", encoding="utf-8"
-                        ) as tf:
-                            tf.writelines(new_lines)
-                except Exception as trades_exc:
+            # Trades run after every OI write, concurrently, so four hung
+            # endpoints cost one timeout rather than four sequential ones.
+            fetched = fetch_trades_for_coins(client_path, written)
+            for coin in written:
+                trades, trades_exc = fetched[coin]
+                if trades_exc is not None:
                     now_str = datetime.datetime.now().isoformat()
                     sys.stderr.write(
                         f"[{now_str}] trades poll error ({coin}): {trades_exc}\n"
                     )
                     sys.stderr.flush()
+                    continue
+                gate = tid_gates[coin]
+                new_lines: List[str] = []
+                for trade in trades or []:
+                    tid = _trade_tid(trade)
+                    if tid is None:
+                        continue
+                    if gate.add(tid):
+                        new_lines.append(json.dumps(slim_trade(trade)) + "\n")
+                if new_lines:
+                    with open(
+                        data_dir / f"trades_{coin}.jsonl", "a", encoding="utf-8"
+                    ) as tf:
+                        tf.writelines(new_lines)
 
         except Exception as exc:
             now_str = datetime.datetime.now().isoformat()

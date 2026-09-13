@@ -10,6 +10,7 @@ Binds loopback only. Read-only forever.
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -79,6 +80,10 @@ COIN_RE = re.compile(r"^[A-Z0-9]{1,16}$")
 # Tail reading: walk backwards in chunks until the window is covered.
 CHUNK_BYTES: int = 64 * 1024
 MAX_TAIL_LINES: int = 4000
+# Trades are denser than OI samples (~1.5–3k rows/hour). 80k lines covers a
+# 24h window at the high end of that; window_capped is the honesty flag if
+# a coin is hotter than the cap, not a reason to drop the cap.
+MAX_TRADE_TAIL_LINES: int = 80000
 
 API_OI_RE = re.compile(r"^/api/oi/([^/]+)$")
 API_L2_RE = re.compile(r"^/api/l2/([^/]+)$")
@@ -298,9 +303,12 @@ def _to_float(val: Any) -> Optional[float]:
     if val is None or val == "":
         return None
     try:
-        return float(val)
+        number = float(val)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _level(raw: Any) -> Optional[Dict[str, Any]]:
@@ -564,12 +572,22 @@ def _first_trade_time(lines: List[bytes]) -> Optional[float]:
     return None
 
 
-def read_recent_trades(path: Path, cutoff_ms: float) -> Tuple[List[Dict[str, Any]], bool]:
+def read_recent_trades(
+    path: Path,
+    cutoff_ms: float,
+    max_lines: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
     """Return parsed trades from the tail of ``path``, oldest first.
 
     ``time`` is milliseconds. Same backwards-chunk walk as the OI reader, so
     cost tracks the lookback rather than total file growth.
+
+    The bool is True only when the line cap is what cut the window short —
+    the oldest remaining row is still inside the lookback. Hitting the cap
+    on older-than-window rows is not a truncated window.
     """
+    if max_lines is None:
+        max_lines = MAX_TRADE_TAIL_LINES
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
@@ -591,7 +609,7 @@ def read_recent_trades(path: Path, cutoff_ms: float) -> Tuple[List[Dict[str, Any
 
             if pos == 0:
                 break
-            if len(complete) >= MAX_TAIL_LINES:
+            if len(complete) >= max_lines:
                 capped = True
                 break
             oldest = _first_trade_time(complete)
@@ -603,10 +621,77 @@ def read_recent_trades(path: Path, cutoff_ms: float) -> Tuple[List[Dict[str, Any
         rec = _parse_trade_line(raw)
         if rec is not None:
             records.append(rec)
-    if len(records) > MAX_TAIL_LINES:
-        records = records[-MAX_TAIL_LINES:]
+    if len(records) > max_lines:
+        records = records[-max_lines:]
         capped = True
+    if capped and records and float(records[0]["time"]) < cutoff_ms:
+        capped = False
     return records, capped
+
+
+def _usable_order_hash(rec: Dict[str, Any]) -> Optional[str]:
+    """Taker-order id, or None when the field cannot group fills.
+
+    Hyperliquid often ships ``hash`` as 0x000… for fills that are not a
+    signed taker order. Collapsing those into one print would invent a
+    sweep that did not happen.
+    """
+    raw = rec.get("hash")
+    if not isinstance(raw, str) or not raw:
+        return None
+    body = raw[2:] if raw.startswith(("0x", "0X")) else raw
+    if not body or set(body) <= {"0"}:
+        return None
+    return raw
+
+
+def _grouped_fills(records: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group in-window fills that share a usable taker-order hash."""
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    order: List[Any] = []
+    for rec in records:
+        key: Any = _usable_order_hash(rec)
+        if key is None:
+            key = ("tid", rec["tid"])
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(rec)
+    return [groups[k] for k in order]
+
+
+def _fills_to_print(
+    fills: List[Dict[str, Any]], levels: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """One print from one or more fills. sz summed, px is the size-weighted mean."""
+    sz_sum = 0.0
+    notional_sum = 0.0
+    times: List[int] = []
+    sides: List[str] = []
+    for rec in fills:
+        px = _to_float(rec.get("px"))
+        sz = _to_float(rec.get("sz"))
+        if px is None or sz is None:
+            continue
+        sz_sum += sz
+        notional_sum += px * sz
+        times.append(int(rec["time"]))
+        side = rec.get("side")
+        if side in ("B", "A"):
+            sides.append(side)
+    if not times or sz_sum <= 0:
+        return None
+    px = notional_sum / sz_sum
+    uniq = set(sides)
+    side = next(iter(uniq)) if len(uniq) == 1 else None
+    return {
+        "px": float(px),
+        "sz": float(sz_sum),
+        "notional": float(notional_sum),
+        "side": side,
+        "time": max(times),
+        "near": _near_labels(px, levels),
+    }
 
 
 def _near_labels(px: float, levels: List[Dict[str, Any]]) -> List[str]:
@@ -629,6 +714,7 @@ def build_prints(
     lookback: str,
     min_notional: float,
     now: float,
+    max_lines: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Assemble notable prints for one coin over one lookback window."""
     window = LOOKBACKS[lookback]
@@ -642,6 +728,7 @@ def build_prints(
         "prints": [],
         "count": 0,
         "truncated": False,
+        "window_capped": False,
         "served_at": round(now, 3),
     }
 
@@ -649,7 +736,8 @@ def build_prints(
         payload["note"] = PRINTS_YOUNG_NOTE
         return payload
 
-    records, _capped = read_recent_trades(path, cutoff_ms)
+    records, window_capped = read_recent_trades(path, cutoff_ms, max_lines=max_lines)
+    payload["window_capped"] = window_capped
 
     by_tid: Dict[int, Dict[str, Any]] = {}
     for rec in records:
@@ -663,31 +751,16 @@ def build_prints(
         except (OSError, UnicodeDecodeError):
             coin_levels = []
 
+    in_window = [rec for rec in by_tid.values() if float(rec["time"]) >= cutoff_ms]
     out: List[Dict[str, Any]] = []
-    for rec in by_tid.values():
-        if float(rec["time"]) < cutoff_ms:
+    for fills in _grouped_fills(in_window):
+        row = _fills_to_print(fills, coin_levels)
+        if row is None or row["notional"] < min_notional:
             continue
-        px = _to_float(rec.get("px"))
-        sz = _to_float(rec.get("sz"))
-        if px is None or sz is None:
-            continue
-        notional = px * sz
-        if notional < min_notional:
-            continue
-        side = rec.get("side")
-        out.append(
-            {
-                "px": float(px),
-                "sz": float(sz),
-                "notional": float(notional),
-                "side": side if side in ("B", "A") else None,
-                "time": int(rec["time"]),
-                "near": _near_labels(px, coin_levels),
-            }
-        )
+        out.append(row)
 
     out.sort(key=lambda row: row["time"], reverse=True)
-    truncated = len(out) > PRINTS_CAP
+    truncated = len(out) > PRINTS_CAP or window_capped
     out = out[:PRINTS_CAP]
     payload["prints"] = out
     payload["count"] = len(out)
