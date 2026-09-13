@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""liq-tape OI and mark sampler.
+"""liq-tape OI, mark, and recent-trades sampler.
 
 Polls the official Hyperliquid client helper for perpetual market contexts
-and appends timestamped records to per-coin jsonl files.
+and the last handful of trades, appending to per-coin jsonl files.
 Read-only: no order execution, no credentials, no signal generation.
 """
 
 import argparse
+from collections import deque
 import datetime
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Set
 
 DEFAULT_INTERVAL: float = 12.0
 DEFAULT_COINS: List[str] = ["BTC", "ETH", "HYPE", "SOL"]
 BASE_DIR: Path = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR: Path = BASE_DIR / "data"
+# recentTrades only returns the last ~10 prints; keep a bounded memory of
+# tids so overlapping polls and a restart against the file tail do not
+# re-append the same row.
+TID_CAP: int = 2000
+TID_TAIL_BYTES: int = 256 * 1024
+TRADES_TIMEOUT: float = 8.0
 DEFAULT_CLIENT_PATH: Path = (
     Path.home()
     / ".hermes"
@@ -49,6 +57,106 @@ def _to_float(val: Any) -> Optional[float]:
         return float(val)
     except (TypeError, ValueError):
         return None
+
+
+class TidGate:
+    """Bounded set of recently seen trade ids. Oldest dropped first."""
+
+    def __init__(self, cap: int = TID_CAP) -> None:
+        self._cap = cap
+        self._order: Deque[int] = deque()
+        self._seen: Set[int] = set()
+
+    def add(self, tid: int) -> bool:
+        """Record ``tid``. Return True only the first time it is seen."""
+        if tid in self._seen:
+            return False
+        self._seen.add(tid)
+        self._order.append(tid)
+        while len(self._order) > self._cap:
+            old = self._order.popleft()
+            self._seen.discard(old)
+        return True
+
+
+def _trade_tid(rec: Dict[str, Any]) -> Optional[int]:
+    raw = rec.get("tid")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        tid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return tid
+
+
+def load_tid_gate(path: Path) -> TidGate:
+    """Resume the watermark from the tail of an existing trades file.
+
+    The file does not have to exist. Partial lines at a chunk boundary are
+    dropped. Older rows further back are not re-appended: recentTrades only
+    ever returns the last ~10 prints, so the tail is enough.
+    """
+    gate = TidGate()
+    if not path.is_file():
+        return gate
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            take = min(size, TID_TAIL_BYTES)
+            f.seek(size - take)
+            raw = f.read()
+    except OSError:
+        return gate
+    if size > take:
+        nl = raw.find(b"\n")
+        if nl >= 0:
+            raw = raw[nl + 1 :]
+        else:
+            raw = b""
+    for line in raw.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        tid = _trade_tid(rec)
+        if tid is not None:
+            gate.add(tid)
+    return gate
+
+
+def fetch_recent_trades(client_path: Path, coin: str) -> List[Dict[str, Any]]:
+    cmd = [
+        sys.executable,
+        str(client_path),
+        "trades",
+        coin,
+        "--json",
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=TRADES_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"trades client exited with code {proc.returncode}: {proc.stderr.strip()}"
+        )
+    payload = json.loads(proc.stdout)
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        rows = payload.get("trades") or []
+    else:
+        rows = []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def fetch_markets(client_path: Path) -> Dict[str, Any]:
@@ -120,6 +228,10 @@ def main() -> None:
 
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    tid_gates: Dict[str, TidGate] = {
+        coin: load_tid_gate(data_dir / f"trades_{coin}.jsonl") for coin in coins
+    }
+
     # Required single startup line
     print(
         f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}",
@@ -158,6 +270,29 @@ def main() -> None:
                 line = json.dumps(record) + "\n"
                 with open(target_file, "a", encoding="utf-8") as f:
                     f.write(line)
+
+                # A failed trades poll must never skip the OI write above.
+                try:
+                    trades = fetch_recent_trades(client_path, coin)
+                    gate = tid_gates[coin]
+                    new_lines: List[str] = []
+                    for trade in trades:
+                        tid = _trade_tid(trade)
+                        if tid is None:
+                            continue
+                        if gate.add(tid):
+                            new_lines.append(json.dumps(trade) + "\n")
+                    if new_lines:
+                        with open(
+                            data_dir / f"trades_{coin}.jsonl", "a", encoding="utf-8"
+                        ) as tf:
+                            tf.writelines(new_lines)
+                except Exception as trades_exc:
+                    now_str = datetime.datetime.now().isoformat()
+                    sys.stderr.write(
+                        f"[{now_str}] trades poll error ({coin}): {trades_exc}\n"
+                    )
+                    sys.stderr.flush()
 
         except Exception as exc:
             now_str = datetime.datetime.now().isoformat()

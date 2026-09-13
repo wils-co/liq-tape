@@ -15,6 +15,7 @@ open a pull request against. Everything else has one.
 | PR4        | Structure levels + UI config   | #3        |
 | PR3.5      | CI doctrine walls              | #4        |
 | PR5        | Board daemon, README, docs     | #5        |
+| PR6        | Volume profile + notable prints | #6        |
 
 ## The offset
 

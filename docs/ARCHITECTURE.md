@@ -6,9 +6,10 @@ Four files matter; everything else is output.
 Hyperliquid official client (subprocess, --json)
         │                    │
    sampler.py           server.py (on demand)
-   every 12s            L2/funding live, cached 2s
+   every 12s            L2/funding/candles live
         │                    │
-  data/oi_<COIN>.jsonl   (sampler files = OI history)
+  data/oi_<COIN>.jsonl     (OI history)
+  data/trades_<COIN>.jsonl (recent prints, last-10 polls)
         │                    │
         └──────► index.html (polls /api/*, renders)
 ```
@@ -17,26 +18,31 @@ Hyperliquid official client (subprocess, --json)
 
 Invokes the official info client as a subprocess on a fixed cadence (default
 12s) and appends one JSON line per coin per poll to `data/oi_<COIN>.jsonl`.
-No network stack in-repo; the client is a local file pointed at by
-`--client`. This file is the only writer in the project.
+After that write, it fetches `recentTrades` for the same coin and appends
+new rows (deduped on `tid`) to `data/trades_<COIN>.jsonl`. A failed trades
+poll never skips the OI write. No network stack in-repo; the client is a
+local file pointed at by `--client`. This file is the only writer in the
+project.
 
 ## server.py
 
 A stdlib `ThreadingHTTPServer` bound to `127.0.0.1` only. It serves
 `index.html` and a read-only JSON API: `/api/oi/<COIN>` reads the tail of the
-sampler's JSONL backwards until the requested lookback is covered, and
-`/api/l2` and `/api/funding` call the client on demand with a short TTL cache
-so several open tabs cost one subprocess call per interval. `levels.yaml` is
-re-parsed per request. The server never opens a file for writing — the CI
-greps that, and there is no write path to the levels file for anything to
-reach.
+sampler's JSONL backwards until the requested lookback is covered;
+`/api/prints/<COIN>` does the same for the trades file; `/api/l2`,
+`/api/funding`, and `/api/profile` call the client on demand with a short TTL
+cache so several open tabs cost one subprocess call per interval. `levels.yaml`
+is re-parsed per request (prints reuse that reader to tag proximity). The
+server never opens a file for writing — the CI greps that, and there is no
+write path to the levels file for anything to reach.
 
 ## index.html
 
 One self-contained page: no CDN, no build step, no external asset. It polls
-the API and renders the OI×price quadrant, L2 depth, funding/premium, and the
-hand-edited levels strip. Every colour comes from one CSS token set so the
-system dark mode cannot regress.
+the API and renders the OI×price quadrant, L2 depth, funding/premium, the
+hand-edited levels strip, and the volume-at-price profile with notable
+prints. Every colour comes from one CSS token set so the system dark mode
+cannot regress.
 
 ## levels.yaml
 

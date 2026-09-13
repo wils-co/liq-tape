@@ -131,5 +131,7 @@ jobs:
 
           # An untracked coin is a 404, not a fabricated empty panel.
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/oi/DOGE)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/profile/DOGE)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/prints/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/nope)" = 404
           echo "smoke: clean"

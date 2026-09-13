@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>liq-tape — OI × price, L2 depth, funding</title>
+<title>liq-tape — OI × price, L2 depth, funding, volume</title>
 <style>
   :root {
     --paper: #fbfaf8;
@@ -149,6 +149,11 @@
   #levels-panel { margin-top: 22px; }
   #levels { max-width: none; }
 
+  /* ⑦ is also price-anchored (volume at price), so it takes the full width. */
+  #profile-panel { margin-top: 22px; }
+  #profile { max-width: none; }
+  .panel-head .toggle button { padding: 4px 10px; font-size: 12px; }
+
   footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
 </style>
 </head>
@@ -156,7 +161,7 @@
 <div class="wrap">
 
   <header>
-    <h1>liq-tape <span>OI × price · L2 depth · funding</span></h1>
+    <h1>liq-tape <span>OI × price · L2 depth · funding · volume</span></h1>
     <div class="toggle" id="coins" role="group" aria-label="coin">
       <button type="button" data-coin="BTC" aria-pressed="true">BTC</button>
       <button type="button" data-coin="ETH" aria-pressed="false">ETH</button>
@@ -234,12 +239,34 @@
          aria-label="hand-maintained structure levels around the last price"></svg>
   </div>
 
+  <div class="panel" id="profile-panel">
+    <div class="panel-head">
+      <h2>⑦ Volume profile</h2>
+      <div class="toggle" id="profile-lookbacks" role="group" aria-label="profile lookback">
+        <button type="button" data-plb="4h" aria-pressed="false">4h</button>
+        <button type="button" data-plb="12h" aria-pressed="false">12h</button>
+        <button type="button" data-plb="24h" aria-pressed="true">24h</button>
+      </div>
+      <span class="note" id="pf-note"></span>
+    </div>
+    <svg id="profile" viewBox="0 0 720 500" role="img"
+         aria-label="volume at price with session VWAP and notable prints"></svg>
+    <dl class="mini">
+      <div><dt>session VWAP</dt><dd id="pf-vwap">—</dd></div>
+      <div><dt>prints</dt><dd id="pf-prints">—</dd></div>
+      <div><dt>window</dt><dd id="pf-window">—</dd></div>
+    </dl>
+    <div class="veil on" id="pf-veil"><p id="pf-veil-text">waiting for 15m candles</p></div>
+  </div>
+
   <footer>
     Read-only instrument panel. Quadrant names are lens text for reading the tape, not instructions —
     the dot's position is the whole of the information. The book is raw depth at a moment, unannotated;
     funding is the exchange's published hourly rate and premium. The levels are yours, read from
     <code>levels.yaml</code> and drawn exactly as written — nothing here detects, ranks, or edits
-    them. Data is the local sampler's append-only files and the official read-only client.
+    them. The volume profile is 15m candles bucketed by price, not a tick tape; notable prints are
+    large recent trades the sampler caught, not a complete flow. Data is the local sampler's
+    append-only files and the official read-only client.
   </footer>
 
 </div>
@@ -271,8 +298,9 @@
   var FUND_FLOOR_PCT = 0.00125;
   var PREM_FLOOR_PCT = 0.02;
 
-  var state = { coin: "BTC", lookback: "1h" };
+  var state = { coin: "BTC", lookback: "1h", profileLookback: "24h" };
   var generation = 0;       // a response from a superseded coin/lookback is dropped
+  var profileEpoch = 0;     // profile lookback is independent of the quadrant chips
 
   // What the chip asked for is not what arrived. Every label about the plotted
   // window is driven from this, never from state.lookback alone.
@@ -890,12 +918,147 @@
       .catch(function () { settle({}, []); });
   }
 
+  // ---- ⑦ Volume profile ------------------------------------------------
+
+  // Horizontal volume-at-price histogram. High price at the top, bar width
+  // is volume in that slice. VWAP is one line; notable prints are ticks on
+  // the price axis. Side B/A is bid-taker / ask-taker, matching the book
+  // colours, never labelled as anything else.
+  var PF = { W: 720, H: 500, L: 72, R: 210, T: 18, B: 40 };
+  var profileData = null;
+  var printsData = null;
+
+  function drawProfile(profile, prints) {
+    var buckets = profile && profile.buckets ? profile.buckets : [];
+    if (!buckets.length) {
+      blankProfile(profile && profile.hint ? profile.hint : "waiting for 15m candles");
+      return;
+    }
+
+    var i, pmin = buckets[0].lo, pmax = buckets[0].hi, maxVol = 0;
+    for (i = 0; i < buckets.length; i++) {
+      pmin = Math.min(pmin, buckets[i].lo);
+      pmax = Math.max(pmax, buckets[i].hi);
+      maxVol = Math.max(maxVol, buckets[i].vol);
+    }
+    if (!(maxVol > 0)) maxVol = 1;
+    var spanP = pmax - pmin;
+    if (!(spanP > 0)) spanP = 1;
+
+    var x0 = PF.L, x1 = PF.W - PF.R, y0 = PF.T, y1 = PF.H - PF.B;
+
+    function yOf(price) {
+      return y1 - ((price - pmin) / spanP) * (y1 - y0);
+    }
+
+    var s = "";
+    s += line(x0, y0, x0, y1, "var(--rule)", 1);
+    s += line(x0, y1, x1, y1, "var(--rule)", 1);
+
+    for (i = 0; i < buckets.length; i++) {
+      var b = buckets[i];
+      var top = yOf(b.hi);
+      var bot = yOf(b.lo);
+      var h = Math.max(0.5, bot - top);
+      var w = (b.vol / maxVol) * (x1 - x0);
+      s += '<rect x="' + x0.toFixed(2) + '" y="' + top.toFixed(2) +
+           '" width="' + Math.max(0, w).toFixed(2) +
+           '" height="' + h.toFixed(2) +
+           '" fill="var(--ink)" opacity="0.22"><title>' +
+           esc(fmtPx(b.lo) + " – " + fmtPx(b.hi) + "  vol " + fmtSize(b.vol)) +
+           "</title></rect>";
+    }
+
+    if (typeof profile.vwap === "number" && isFinite(profile.vwap)) {
+      var vy = yOf(profile.vwap);
+      s += line(x0, vy, x1, vy, "var(--amber)", 1.25, "4 3");
+      s += text(x1 - 8, vy - 6, "VWAP", {
+        size: 10, anchor: "end", fill: "var(--amber)"
+      });
+    }
+
+    s += text(x0 - 8, y0 + 4, fmtPx(pmax), { size: 10, anchor: "end" });
+    s += text(x0 - 8, y1 + 4, fmtPx(pmin), { size: 10, anchor: "end" });
+    if (typeof profile.vwap === "number" && isFinite(profile.vwap)) {
+      s += text(x0 - 8, yOf(profile.vwap) + 4, fmtPx(profile.vwap), {
+        size: 10, anchor: "end", fill: "var(--amber)"
+      });
+    }
+
+    var rows = prints && prints.prints ? prints.prints : [];
+    for (i = 0; i < rows.length; i++) {
+      var p = rows[i];
+      if (typeof p.px !== "number" || !isFinite(p.px)) continue;
+      var py = yOf(p.px);
+      if (py < y0 - 6 || py > y1 + 6) continue;
+      var col = p.side === "A" ? "var(--red)" : p.side === "B" ? "var(--green)" : "var(--ink)";
+      s += line(x0 - 7, py, x0, py, col, 1.5);
+      s += '<circle cx="' + x0 + '" cy="' + py.toFixed(2) + '" r="2.2" fill="' + col + '" />';
+      if (p.near && p.near.length) {
+        s += text(x1 + 10, py + 4, p.near.join(" · "), {
+          size: 10, anchor: "start", fill: "var(--muted)"
+        });
+      }
+    }
+
+    s += text((x0 + x1) / 2, PF.H - 14,
+      "volume at price · each 15m bar split evenly across its high–low span",
+      { size: 10, fill: "var(--faint)" });
+    s += text(x0 + 10, y0 + 12, "bid-taker", { size: 9, anchor: "start", fill: "var(--green)" });
+    s += text(x0 + 78, y0 + 12, "ask-taker", { size: 9, anchor: "start", fill: "var(--red)" });
+
+    el("profile").innerHTML = s;
+
+    el("pf-vwap").textContent = typeof profile.vwap === "number" ? fmtPx(profile.vwap) : "—";
+    var nPrints = prints && typeof prints.count === "number" ? prints.count : 0;
+    var printLabel = nPrints === 0
+      ? (prints && prints.note ? "none yet" : "—")
+      : String(nPrints) + (prints && prints.truncated ? " · truncated" : "");
+    el("pf-prints").textContent = printLabel;
+    el("pf-window").textContent = profile.lookback || state.profileLookback;
+
+    var note = el("pf-note");
+    var age = typeof profile.served_at === "number" ? (Date.now() / 1000) - profile.served_at : null;
+    var parts = [buckets.length + " buckets"];
+    if (age !== null && isFinite(age)) parts.push(ageText(age));
+    if (prints && prints.truncated) parts.push("prints truncated");
+    if (prints && prints.note && nPrints === 0) parts.push("prints accumulating");
+    note.textContent = parts.join(" · ");
+    note.className = (prints && prints.truncated) ? "note flag" : "note";
+
+    setPanelVeil("pf-veil", "pf-veil-text", false, "");
+  }
+
+  function paintProfile() {
+    if (!profileData || profileData.error) {
+      blankProfile(profileData && profileData.hint
+        ? profileData.hint
+        : "waiting for 15m candles");
+      return;
+    }
+    drawProfile(profileData, printsData);
+  }
+
+  function blankProfile(message) {
+    el("profile").innerHTML = "";
+    el("pf-vwap").textContent = "—";
+    el("pf-prints").textContent = "—";
+    el("pf-window").textContent = "—";
+    el("pf-note").textContent = "";
+    el("pf-note").className = "note";
+    setPanelVeil("pf-veil", "pf-veil-text", true, message);
+  }
+
   // One poller per endpoint, all sharing the generation counter so a coin
   // switch retires every panel's in-flight request at once.
   function createPoller(opts) {
     var timer = null;
     var inflight = null;
     var busy = false;
+
+    function epoch() {
+      return opts.epoch ? opts.epoch() : generation;
+    }
 
     function tick() {
       // One request at a time. A tick landing on an open request is dropped
@@ -904,7 +1067,7 @@
       if (busy) return;
       busy = true;
 
-      var mine = generation;
+      var mine = epoch();
       var ctrl = typeof AbortController === "function" ? new AbortController() : null;
       inflight = ctrl;
 
@@ -918,7 +1081,7 @@
         if (timeoutId) clearTimeout(timeoutId);
         // A superseded response has already had its slot handed to the new
         // request; it must not clear that request's flags or paint anything.
-        if (mine !== generation) return false;
+        if (mine !== epoch()) return false;
         busy = false;
         inflight = null;
         return true;
@@ -987,6 +1150,43 @@
     }
   });
 
+  var profilePoller = createPoller({
+    intervalMs: 60000,
+    epoch: function () { return profileEpoch; },
+    url: function () {
+      return "/api/profile/" + encodeURIComponent(state.coin) +
+             "?lookback=" + encodeURIComponent(state.profileLookback);
+    },
+    onData: function (ok, body) {
+      if (!ok || (body && body.error)) {
+        profileData = body || null;
+        blankProfile(reasonFor(body, "no 15m candles for " + state.coin));
+        return;
+      }
+      profileData = body;
+      paintProfile();
+    },
+    onFail: function (timedOut) {
+      profileData = null;
+      blankProfile(timedOut ? "server not responding — is server.py running?" : "server unreachable — is server.py running?");
+    }
+  });
+
+  var printsPoller = createPoller({
+    intervalMs: 12000,
+    url: function () {
+      return "/api/prints/" + encodeURIComponent(state.coin) + "?lookback=1h&min_notional=25000";
+    },
+    onData: function (ok, body) {
+      printsData = ok && body ? body : { prints: [], count: 0, note: "prints need the sampler to accumulate — full picture in ~24h" };
+      if (profileData && !profileData.error) paintProfile();
+    },
+    onFail: function () {
+      printsData = { prints: [], count: 0, note: "prints need the sampler to accumulate — full picture in ~24h" };
+      if (profileData && !profileData.error) paintProfile();
+    }
+  });
+
   // The server's own hint is the honest message when it sent one, except
   // where the hint is an instruction to the operator rather than a state.
   function reasonFor(body, fallback) {
@@ -1001,6 +1201,7 @@
     // Retire the current selection: a slow reply from the previous coin or
     // lookback must never paint under the new labels.
     generation++;
+    profileEpoch++;
     clearSpan();
     renderCoverage();
     // The old coin's price must not anchor the new coin's levels, even for
@@ -1008,9 +1209,14 @@
     lastMark = null;
     renderLevels();
     fetchLevels();
+    profileData = null;
+    printsData = null;
+    blankProfile("waiting for 15m candles");
     oiPoller.restart();
     l2Poller.restart();
     fundingPoller.restart();
+    profilePoller.restart();
+    printsPoller.restart();
   }
 
   el("coins").addEventListener("click", function (e) {
@@ -1033,10 +1239,24 @@
     restart();
   });
 
+  el("profile-lookbacks").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-plb]");
+    if (!btn) return;
+    state.profileLookback = btn.dataset.plb;
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+    profileEpoch++;
+    profileData = null;
+    blankProfile("waiting for 15m candles");
+    profilePoller.restart();
+  });
+
   buildLadder();
   drawQuadrant(null, null);
   blankL2("waiting for the book");
   blankFunding("waiting for funding history");
+  blankProfile("waiting for 15m candles");
   restart();
 })();
 </script>
