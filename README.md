@@ -139,13 +139,51 @@ colour, including the ones inside the SVG panels, comes from one token set. No
 manual toggle. The header toggle covers BTC, ETH, HYPE and SOL, matching the
 sampler's defaults.
 
+## Scope (PR6: volume profile + notable prints)
+
+Executed flow, next to the book's resting size. Two additions, one panel.
+
+### Volume profile
+`GET /api/profile/<COIN>?lookback=4h|12h|24h` (default `24h`) fetches 15m
+candles from the official client and builds a price histogram (~48 buckets
+across the window's high–low) plus session VWAP
+(`Σ((h+l+c)/3 × v) / Σv`). Each candle's volume is split evenly across the
+buckets its high–low span covers — 15m bars have no intra-bar distribution,
+and the panel says so. Cached 60s per (coin, lookback). px/ohlc/v arrive as
+strings and are converted to floats before they leave the server.
+
+### Notable prints
+The sampler now also polls `recentTrades` (last ~10 prints, not a full tape)
+on the same 12s cadence and appends new rows to `data/trades_<COIN>.jsonl`,
+deduped on `tid`, without the `users` address pair. A restart resumes the
+watermark from the file tail. Trades fetches for the tracked coins run
+concurrently after the OI writes, so a hung trades endpoint cannot stretch
+the OI cadence past one timeout.
+
+`GET /api/prints/<COIN>?lookback=15m|1h|4h&min_notional=<usd>` (default `1h` /
+`$25,000`) reads that file, aggregates fills that share a taker-order
+`hash` and side (sum `sz`, size-weighted `px`) *before* the notional
+filter, and tags prints within 0.15% of a `levels.yaml` entry. Cap 200 with an honest
+`truncated` flag; `window_capped` is set when the file tail cap cut the
+window short. A missing trades file is an empty list with a note, not a
+404 — the sampler may be older than the board. Side is `B` or `A`
+(bid-taker / ask-taker); the page does not relabel it. Panel ⑦ labels
+the prints readout `prints · 1h` — that window is not the profile chip.
+
+### Panel ⑦
+Full-width histogram under the levels strip: volume-at-price bars, VWAP line,
+print ticks on the price axis with a level's label when the print is near one.
+Own 4h/12h/24h chips. Dark mode is the same CSS tokens as the rest of the
+page. Gaps in the tape are expected and labelled.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every
-12 seconds and appends the result to `data/oi_<COIN>.jsonl`. The board reads
-those files for the OI quadrants, and calls the same client's live L2 and
-funding endpoints on demand (cached a few seconds between polls), with nothing
-else touching the network. No keys, no orders, no alerts — ever. The doctrine
+12 seconds and appends the result to `data/oi_<COIN>.jsonl` and
+`data/trades_<COIN>.jsonl`. The board reads those files for the OI quadrant
+and notable prints, and calls the same client's live L2, funding, and 15m
+candle endpoints on demand (cached between polls), with nothing else touching
+the network. No keys, no orders, no alerts — ever. The doctrine
 up top is not a slogan: the CI workflow in `.github/workflows/verify.yml` is
 the rulebook, executed on every PR. It greps the code for an order path, any
 credential-shaped name, a non-loopback bind, and signal language in the copy;
@@ -161,7 +199,8 @@ if any of those appears, the build fails and the pull request cannot be merged.
   machine. 8791 is free; if it ever isn't, `python3 server.py --port <n>` takes
   a different loopback port.
 - **Where data lives:** `data/` (gitignored). `oi_<COIN>.jsonl` is the OI
-  history; the logs sit beside it.
+  history; `trades_<COIN>.jsonl` is the notable-prints log (last-10 polls,
+  not a full tape). The process logs sit beside them.
 - **Back it up:** Hyperliquid has no OI-history endpoint. Every hour the
   sampler records exists nowhere else but on this machine — `data/` is the
   only copy, and once the disk is gone the history is gone with it.

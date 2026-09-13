@@ -10,6 +10,7 @@ Binds loopback only. Read-only forever.
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -51,6 +52,24 @@ L2_CACHE_TTL: float = 2.0
 FUNDING_HOURS: int = 24
 FUNDING_CACHE_TTL: float = 30.0
 
+# Volume profile: 15m candles, bucketed by price. Bars are 15 minutes; a
+# 60s cache is plenty — the next bar cannot exist yet.
+PROFILE_LOOKBACKS: Dict[str, float] = {"4h": 4.0, "12h": 12.0, "24h": 24.0}
+DEFAULT_PROFILE_LOOKBACK: str = "24h"
+PROFILE_CACHE_TTL: float = 60.0
+PROFILE_BUCKETS: int = 48
+CANDLE_INTERVAL: str = "15m"
+
+# Notable prints: last-N tape from the sampler, filtered by notional.
+# 0.15% is the proximity used to attach a level's label to a print.
+DEFAULT_PRINTS_LOOKBACK: str = "1h"
+DEFAULT_MIN_NOTIONAL: float = 25000.0
+PRINTS_CAP: int = 200
+NEAR_LEVEL_FRAC: float = 0.0015
+PRINTS_YOUNG_NOTE: str = (
+    "prints need the sampler to accumulate — full picture in ~24h"
+)
+
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
 DEFAULT_LOOKBACK: str = "1h"
@@ -61,10 +80,16 @@ COIN_RE = re.compile(r"^[A-Z0-9]{1,16}$")
 # Tail reading: walk backwards in chunks until the window is covered.
 CHUNK_BYTES: int = 64 * 1024
 MAX_TAIL_LINES: int = 4000
+# Trades are denser than OI samples (~1.5–3k rows/hour). 80k lines covers a
+# 24h window at the high end of that; window_capped is the honesty flag if
+# a coin is hotter than the cap, not a reason to drop the cap.
+MAX_TRADE_TAIL_LINES: int = 80000
 
 API_OI_RE = re.compile(r"^/api/oi/([^/]+)$")
 API_L2_RE = re.compile(r"^/api/l2/([^/]+)$")
 API_FUNDING_RE = re.compile(r"^/api/funding/([^/]+)$")
+API_PROFILE_RE = re.compile(r"^/api/profile/([^/]+)$")
+API_PRINTS_RE = re.compile(r"^/api/prints/([^/]+)$")
 
 # levels.yaml is human-edited, so the reader understands one documented
 # subset of YAML and names the line it could not read rather than guessing.
@@ -251,6 +276,7 @@ class TimedCache:
 
 L2_CACHE = TimedCache(L2_CACHE_TTL)
 FUNDING_CACHE = TimedCache(FUNDING_CACHE_TTL)
+PROFILE_CACHE = TimedCache(PROFILE_CACHE_TTL)
 
 
 def run_client(client_path: Path, args: List[str]) -> Any:
@@ -277,9 +303,12 @@ def _to_float(val: Any) -> Optional[float]:
     if val is None or val == "":
         return None
     try:
-        return float(val)
+        number = float(val)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _level(raw: Any) -> Optional[Dict[str, Any]]:
@@ -378,6 +407,374 @@ def build_funding(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
 
     payload["avg"] = sum(h["funding"] for h in hours) / len(hours)
     payload["latest"] = hours[-1]
+    return payload
+
+
+def _candle(raw: Any) -> Optional[Dict[str, Any]]:
+    """One 15m bar, px/ohlc/v converted from the client's strings to floats."""
+    if not isinstance(raw, dict):
+        return None
+    high = _to_float(raw.get("high", raw.get("h")))
+    low = _to_float(raw.get("low", raw.get("l")))
+    close = _to_float(raw.get("close", raw.get("c")))
+    vol = _to_float(raw.get("volume", raw.get("v")))
+    stamp = raw.get("time", raw.get("t"))
+    if high is None or low is None or close is None or vol is None:
+        return None
+    if low > high:
+        low, high = high, low
+    return {
+        "high": high,
+        "low": low,
+        "close": close,
+        "vol": vol,
+        "time": stamp if isinstance(stamp, (int, float)) else None,
+    }
+
+
+def _distribute_volume(
+    buckets: List[Dict[str, float]], low: float, high: float, vol: float
+) -> None:
+    """Split one bar's volume uniformly across the buckets its low..high covers.
+
+    A 15m candle has no intra-bar distribution; uniform is the honest
+    approximation, not a tick profile.
+    """
+    if vol <= 0 or not buckets:
+        return
+    span = high - low
+    if span <= 0:
+        pmin = buckets[0]["lo"]
+        pmax = buckets[-1]["hi"]
+        width = pmax - pmin
+        if width <= 0:
+            buckets[0]["vol"] += vol
+            return
+        idx = int((low - pmin) / width * len(buckets))
+        idx = min(len(buckets) - 1, max(0, idx))
+        buckets[idx]["vol"] += vol
+        return
+    for bucket in buckets:
+        overlap = min(high, bucket["hi"]) - max(low, bucket["lo"])
+        if overlap > 0:
+            bucket["vol"] += vol * (overlap / span)
+
+
+def build_profile(
+    client_path: Path, coin: str, lookback: str, now: float
+) -> Dict[str, Any]:
+    """Assemble the volume-at-price histogram and session VWAP for one window."""
+    hours = PROFILE_LOOKBACKS[lookback]
+    raw = run_client(
+        client_path,
+        [
+            "candles",
+            coin,
+            "--interval",
+            CANDLE_INTERVAL,
+            "--hours",
+            str(hours),
+            "--limit",
+            "0",
+        ],
+    )
+    if not isinstance(raw, dict):
+        raise ClientError("unexpected candles payload shape")
+
+    candles = [c for c in (_candle(item) for item in (raw.get("candles") or [])) if c]
+
+    window_ms = int(hours * 3600 * 1000)
+    to_ms = int(now * 1000)
+    from_ms = to_ms - window_ms
+
+    payload: Dict[str, Any] = {
+        "coin": coin,
+        "lookback": lookback,
+        "buckets": [],
+        "vwap": None,
+        "from": from_ms,
+        "to": to_ms,
+        "served_at": round(now, 3),
+    }
+
+    if not candles:
+        payload["error"] = "no_candles"
+        payload["hint"] = f"no {CANDLE_INTERVAL} candles returned for {coin}"
+        return payload
+
+    pmin = min(c["low"] for c in candles)
+    pmax = max(c["high"] for c in candles)
+
+    if pmax <= pmin:
+        buckets: List[Dict[str, float]] = [{"lo": pmin, "hi": pmax, "vol": 0.0}]
+    else:
+        width = (pmax - pmin) / PROFILE_BUCKETS
+        buckets = [
+            {
+                "lo": pmin + i * width,
+                "hi": pmin + (i + 1) * width,
+                "vol": 0.0,
+            }
+            for i in range(PROFILE_BUCKETS)
+        ]
+        buckets[-1]["hi"] = pmax
+
+    for candle in candles:
+        _distribute_volume(buckets, candle["low"], candle["high"], candle["vol"])
+
+    # Typical-price VWAP over the window: Σ((h+l+c)/3 × v) / Σv.
+    weighted = 0.0
+    total_vol = 0.0
+    for candle in candles:
+        if candle["vol"] <= 0:
+            continue
+        typical = (candle["high"] + candle["low"] + candle["close"]) / 3.0
+        weighted += typical * candle["vol"]
+        total_vol += candle["vol"]
+
+    payload["buckets"] = [
+        {"lo": float(b["lo"]), "hi": float(b["hi"]), "vol": float(b["vol"])}
+        for b in buckets
+    ]
+    payload["vwap"] = float(weighted / total_vol) if total_vol > 0 else None
+    return payload
+
+
+def _parse_trade_line(raw: bytes) -> Optional[Dict[str, Any]]:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        rec = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    tid = rec.get("tid")
+    if tid is None or isinstance(tid, bool):
+        return None
+    try:
+        rec = dict(rec)
+        rec["tid"] = int(tid)
+    except (TypeError, ValueError):
+        return None
+    stamp = rec.get("time")
+    if not isinstance(stamp, (int, float)):
+        return None
+    return rec
+
+
+def _first_trade_time(lines: List[bytes]) -> Optional[float]:
+    for raw in lines:
+        rec = _parse_trade_line(raw)
+        if rec is not None:
+            return float(rec["time"])
+    return None
+
+
+def read_recent_trades(
+    path: Path,
+    cutoff_ms: float,
+    max_lines: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return parsed trades from the tail of ``path``, oldest first.
+
+    ``time`` is milliseconds. Same backwards-chunk walk as the OI reader, so
+    cost tracks the lookback rather than total file growth.
+
+    The bool is True only when the line cap is what cut the window short —
+    the oldest remaining row is still inside the lookback. Hitting the cap
+    on older-than-window rows is not a truncated window.
+    """
+    if max_lines is None:
+        max_lines = MAX_TRADE_TAIL_LINES
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if size == 0:
+            return [], False
+
+        pos = size
+        buf = b""
+        capped = False
+        complete: List[bytes] = []
+        while True:
+            step = min(CHUNK_BYTES, pos)
+            pos -= step
+            f.seek(pos)
+            buf = f.read(step) + buf
+
+            lines = buf.split(b"\n")
+            complete = lines if pos == 0 else lines[1:]
+
+            if pos == 0:
+                break
+            if len(complete) >= max_lines:
+                capped = True
+                break
+            oldest = _first_trade_time(complete)
+            if oldest is not None and oldest < cutoff_ms:
+                break
+
+    records: List[Dict[str, Any]] = []
+    for raw in complete:
+        rec = _parse_trade_line(raw)
+        if rec is not None:
+            records.append(rec)
+    if len(records) > max_lines:
+        records = records[-max_lines:]
+        capped = True
+    if capped and records and float(records[0]["time"]) < cutoff_ms:
+        capped = False
+    return records, capped
+
+
+def _usable_order_hash(rec: Dict[str, Any]) -> Optional[str]:
+    """Taker-order id, or None when the field cannot group fills.
+
+    Hyperliquid often ships ``hash`` as 0x000… for fills that are not a
+    signed taker order. Collapsing those into one print would invent a
+    sweep that did not happen.
+    """
+    raw = rec.get("hash")
+    if not isinstance(raw, str) or not raw:
+        return None
+    body = raw[2:] if raw.startswith(("0x", "0X")) else raw
+    if not body or set(body) <= {"0"}:
+        return None
+    return raw
+
+
+def _grouped_fills(records: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group in-window fills that share a usable taker-order hash and side.
+
+    One Hyperliquid action can carry both sides. Hash-only grouping would
+    fuse a bid-taker fill and an ask-taker fill into one print at an
+    average price — inventing a sweep that did not happen. A sweep is
+    one-sided; mixed batches split.
+    """
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    order: List[Any] = []
+    for rec in records:
+        digest = _usable_order_hash(rec)
+        if digest is None:
+            key: Any = ("tid", rec["tid"])
+        else:
+            key = (digest, rec.get("side"))
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(rec)
+    return [groups[k] for k in order]
+
+
+def _fills_to_print(
+    fills: List[Dict[str, Any]], levels: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """One print from one or more fills. sz summed, px is the size-weighted mean."""
+    sz_sum = 0.0
+    notional_sum = 0.0
+    times: List[int] = []
+    sides: List[str] = []
+    for rec in fills:
+        px = _to_float(rec.get("px"))
+        sz = _to_float(rec.get("sz"))
+        if px is None or sz is None:
+            continue
+        sz_sum += sz
+        notional_sum += px * sz
+        times.append(int(rec["time"]))
+        side = rec.get("side")
+        if side in ("B", "A"):
+            sides.append(side)
+    if not times or sz_sum <= 0:
+        return None
+    px = notional_sum / sz_sum
+    uniq = set(sides)
+    side = next(iter(uniq)) if len(uniq) == 1 else None
+    return {
+        "px": float(px),
+        "sz": float(sz_sum),
+        "notional": float(notional_sum),
+        "side": side,
+        "time": max(times),
+        "near": _near_labels(px, levels),
+    }
+
+
+def _near_labels(px: float, levels: List[Dict[str, Any]]) -> List[str]:
+    """Labels of structure levels within 0.15% of ``px``. Empty if none."""
+    labels: List[str] = []
+    for lvl in levels:
+        price = lvl.get("price")
+        if not isinstance(price, (int, float)) or price == 0:
+            continue
+        if abs(px - float(price)) / abs(float(price)) <= NEAR_LEVEL_FRAC:
+            label = lvl.get("label")
+            labels.append(label if isinstance(label, str) and label else str(price))
+    return labels
+
+
+def build_prints(
+    data_dir: Path,
+    levels_file: Path,
+    coin: str,
+    lookback: str,
+    min_notional: float,
+    now: float,
+    max_lines: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Assemble notable prints for one coin over one lookback window."""
+    window = LOOKBACKS[lookback]
+    cutoff_ms = (now - window) * 1000.0
+    path = data_dir / f"trades_{coin}.jsonl"
+
+    payload: Dict[str, Any] = {
+        "coin": coin,
+        "lookback": lookback,
+        "min_notional": float(min_notional),
+        "prints": [],
+        "count": 0,
+        "truncated": False,
+        "window_capped": False,
+        "served_at": round(now, 3),
+    }
+
+    if not path.is_file():
+        payload["note"] = PRINTS_YOUNG_NOTE
+        return payload
+
+    records, window_capped = read_recent_trades(path, cutoff_ms, max_lines=max_lines)
+    payload["window_capped"] = window_capped
+
+    by_tid: Dict[int, Dict[str, Any]] = {}
+    for rec in records:
+        by_tid[rec["tid"]] = rec
+
+    coin_levels: List[Dict[str, Any]] = []
+    if levels_file.is_file():
+        try:
+            coins, _errors = parse_levels(levels_file.read_text(encoding="utf-8"))
+            coin_levels = coins.get(coin, [])
+        except (OSError, UnicodeDecodeError):
+            coin_levels = []
+
+    in_window = [rec for rec in by_tid.values() if float(rec["time"]) >= cutoff_ms]
+    out: List[Dict[str, Any]] = []
+    for fills in _grouped_fills(in_window):
+        row = _fills_to_print(fills, coin_levels)
+        if row is None or row["notional"] < min_notional:
+            continue
+        out.append(row)
+
+    out.sort(key=lambda row: row["time"], reverse=True)
+    truncated = len(out) > PRINTS_CAP or window_capped
+    out = out[:PRINTS_CAP]
+    payload["prints"] = out
+    payload["count"] = len(out)
+    payload["truncated"] = truncated
+    if not out:
+        payload["note"] = PRINTS_YOUNG_NOTE
     return payload
 
 
@@ -626,6 +1023,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_live(match.group(1), "funding")
             return
 
+        match = API_PROFILE_RE.match(route)
+        if match:
+            self._send_profile(match.group(1), parse_qs(parsed.query))
+            return
+
+        match = API_PRINTS_RE.match(route)
+        if match:
+            self._send_prints(match.group(1), parse_qs(parsed.query))
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "path": route})
 
     def _send_index(self) -> None:
@@ -739,6 +1146,103 @@ class Handler(BaseHTTPRequestHandler):
         payload["cached"] = cached
         self._send_json(HTTPStatus.OK, payload)
 
+    def _send_profile(self, raw_coin: str, query: Dict[str, List[str]]) -> None:
+        coin = self._resolve_coin(raw_coin)
+        if coin is None:
+            return
+
+        lookback = (query.get("lookback") or [DEFAULT_PROFILE_LOOKBACK])[0]
+        if lookback not in PROFILE_LOOKBACKS:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "bad_lookback",
+                    "lookback": lookback,
+                    "allowed": list(PROFILE_LOOKBACKS),
+                },
+            )
+            return
+
+        if not self.client_path.is_file():
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "error": "client_missing",
+                    "coin": coin,
+                    "expected": str(self.client_path),
+                    "hint": "point --client at the official client",
+                },
+            )
+            return
+
+        try:
+            payload, cached = PROFILE_CACHE.get(
+                f"{coin}:{lookback}",
+                lambda: build_profile(self.client_path, coin, lookback, time.time()),
+            )
+        except ClientError as exc:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {
+                    "error": "client_failed",
+                    "coin": coin,
+                    "detail": str(exc),
+                    "hint": "the official client did not return data",
+                },
+            )
+            return
+
+        payload = dict(payload)
+        payload["cached"] = cached
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _send_prints(self, raw_coin: str, query: Dict[str, List[str]]) -> None:
+        coin = self._resolve_coin(raw_coin)
+        if coin is None:
+            return
+
+        lookback = (query.get("lookback") or [DEFAULT_PRINTS_LOOKBACK])[0]
+        if lookback not in LOOKBACKS:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "bad_lookback",
+                    "lookback": lookback,
+                    "allowed": list(LOOKBACKS),
+                },
+            )
+            return
+
+        raw_min = (query.get("min_notional") or [str(DEFAULT_MIN_NOTIONAL)])[0]
+        min_notional = _to_float(raw_min)
+        if min_notional is None or min_notional < 0:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "bad_min_notional",
+                    "min_notional": raw_min,
+                },
+            )
+            return
+
+        try:
+            payload = build_prints(
+                self.data_dir,
+                self.levels_file,
+                coin,
+                lookback,
+                min_notional,
+                time.time(),
+            )
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "coin": coin, "detail": str(exc)},
+            )
+            return
+
+        self._send_json(HTTPStatus.OK, payload)
+
     def _send_oi(self, raw_coin: str, query: Dict[str, List[str]]) -> None:
         coin = raw_coin.upper()
         if not COIN_RE.match(coin):
@@ -839,7 +1343,7 @@ def main() -> None:
         # say so per request rather than the whole server refusing to start.
         print(
             f"warning: client not found at {Handler.client_path} — "
-            "L2 and funding panels will report client_missing",
+            "L2, funding, and profile panels will report client_missing",
             flush=True,
         )
 
