@@ -176,6 +176,36 @@ print ticks on the price axis with a level's label when the print is near one.
 Own 4h/12h/24h chips. Dark mode is the same CSS tokens as the rest of the
 page. Gaps in the tape are expected and labelled.
 
+## Scope (PR7: walls, sampled CVD, layer chips)
+
+Data the board already had: the L2 book and the sampled trades file. No new
+client command, no time×price canvas.
+
+### Walls
+Each L2 level now carries `notional` (`px × sz`) and `wall` (boolean). A wall
+is a level whose notional is at or above **4× the median notional of that
+side**, or **$1M**, whichever is larger. The threshold actually used is in
+the payload as `wall_threshold` (`bids` / `asks`). Width of a bar still maps
+size; walls are drawn heavier and labelled with notional. Tagged on
+`GET /api/l2/<COIN>` so the existing 2s cache is the only book fetch.
+
+### CVD
+`GET /api/cvd/<COIN>?lookback=15m|1h|4h` (default `1h`) walks the trades
+file, converts px/sz to floats on the server, and accumulates signed
+notional: side `B` adds, side `A` subtracts. Payload is `sampled: true`, a
+running `cvd` series plus `latest`, and the same young / `truncated` /
+`window_capped` notes as prints. A missing trades file is **200** with a
+note, not 404 — the sampler may be older than the board. An untracked coin
+is **404**.
+
+### Layer chips
+Header chips `walls` `liq` `stops` `tp` `profile` `cvd`. Only walls, profile
+and cvd do anything yet; liq / stops / tp stay visible and disabled, with a
+methodology line that they need a later PR. Compact tape under L2 reuses
+`/api/prints` (it does not add another set of ticks on panel ⑦). CVD spark
+sits under that list. Methodology: `HL only · sampled tape (last ~10/poll) ·
+not a full book`.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every
