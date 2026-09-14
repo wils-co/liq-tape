@@ -183,11 +183,13 @@ client command, no time×price canvas.
 
 ### Walls
 Each L2 level now carries `notional` (`px × sz`) and `wall` (boolean). A wall
-is a level whose notional is at or above **4× the median notional of that
-side**, or **$1M**, whichever is larger. The threshold actually used is in
-the payload as `wall_threshold` (`bids` / `asks`). Width of a bar still maps
-size; walls are drawn heavier and labelled with notional. Tagged on
-`GET /api/l2/<COIN>` so the existing 2s cache is the only book fetch.
+is a level whose notional is at or above **1.5× the median notional of that
+side**, or **20% of that side's visible notional** — either is enough. No
+dollar floor. `wall_threshold` reports both cutoffs per side (`median_1_5`,
+`share_20`); a side with fewer than 3 levels has no walls and omits the
+cutoffs. Width of a bar still maps size; walls are drawn heavier and
+labelled with notional. Tagged on `GET /api/l2/<COIN>` so the existing 2s
+cache is the only book fetch.
 
 ### CVD
 `GET /api/cvd/<COIN>?lookback=15m|1h|4h` (default `1h`) walks the trades
@@ -201,10 +203,10 @@ is **404**.
 ### Layer chips
 Header chips `walls` `liq` `stops` `tp` `profile` `cvd`. Only walls, profile
 and cvd do anything yet; liq / stops / tp stay visible and disabled, with a
-methodology line that they need a later PR. Compact tape under L2 reuses
-`/api/prints` (it does not add another set of ticks on panel ⑦). CVD spark
-sits under that list. Methodology: `HL only · sampled tape (last ~10/poll) ·
-not a full book`.
+methodology line that they need a later PR. Under L2, a compact list of
+`/api/prints` (`≥ $25k`, `1h`) — notable prints, not the raw tape — with the
+CVD spark under that list. Methodology: `HL only · sampled tape (last
+~10/poll) · not a full book` describes CVD, not the prints list.
 
 ## How it watches
 

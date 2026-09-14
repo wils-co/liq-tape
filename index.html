@@ -256,7 +256,7 @@
 
     <div class="panel" id="tape-cvd">
       <div class="panel-head">
-        <h2>tape · cvd</h2>
+        <h2>prints ≥ $25k · 1h</h2>
         <span class="note" id="cvd-note"></span>
       </div>
       <div class="tape" id="tape"><div class="empty">waiting for prints</div></div>
@@ -321,9 +321,10 @@
     <code>levels.yaml</code> and drawn exactly as written — nothing here detects, ranks, or edits
     them. The volume profile is 15m candles bucketed by price, not a tick tape; notable prints are
     large recent trades the sampler caught, not a complete flow. Walls are resting size at
-    or above 4× the median notional of that side of the book, floored at $1M. CVD is the
-    cumulative signed sampled tape (last ~10 prints per poll), not a full book. Data is the
-    local sampler's append-only files and the official read-only client.
+    or above 1.5× the median notional of that side of the book, or 20% of that side's
+    visible notional. CVD is the cumulative signed sampled tape (last ~10 prints per poll),
+    not a full book. Data is the local sampler's append-only files and the official
+    read-only client.
   </footer>
 
 </div>
@@ -663,11 +664,10 @@
   }
 
   function wallThreshLabel(thr) {
-    if (!thr || typeof thr !== "object") {
-      return typeof thr === "number" ? fmtNotional(thr) : "";
-    }
-    if (thr.bids === thr.asks) return fmtNotional(thr.bids);
-    return fmtNotional(thr.bids) + " / " + fmtNotional(thr.asks);
+    if (!thr || typeof thr !== "object") return "";
+    var side = thr.bids || thr.asks;
+    if (!side || typeof side.median_1_5 !== "number") return "1.5× or 20%";
+    return "1.5× or 20%";
   }
 
   function renderL2(data) {

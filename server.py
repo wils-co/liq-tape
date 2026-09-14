@@ -70,10 +70,13 @@ PRINTS_YOUNG_NOTE: str = (
     "prints need the sampler to accumulate — full picture in ~24h"
 )
 
-# A wall is an outlier on its own side of the book: 4× that side's median
-# notional, floored at $1M so a quiet book is not a wall of walls.
-WALL_MEDIAN_MULT: float = 4.0
-WALL_FLOOR: float = 1_000_000.0
+# A wall is an outlier on its own side of the 15-tick book: 1.5× that
+# side's median notional, or 20% of that side's visible notional. No
+# dollar floor — $1M never fired on live size. Fewer than 3 levels is
+# not enough of a book to call anything a wall.
+WALL_MEDIAN_MULT: float = 1.5
+WALL_SHARE: float = 0.20
+WALL_MIN_LEVELS: int = 3
 
 # Cumulative signed sampled tape. Same lookbacks as prints; the file is
 # last-~10 prints per 12s poll, not a full tape — sampled: true says so.
@@ -352,24 +355,29 @@ def _median(values: List[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
-def _tag_side_walls(levels: List[Dict[str, Any]]) -> float:
-    """Add ``notional`` and ``wall`` on each level. Return this side's threshold.
+def _tag_side_walls(levels: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """Add ``notional`` and ``wall`` on each level. Return this side's cutoffs.
 
-    Threshold is 4× the median notional of *this* side, or ``WALL_FLOOR``,
-    whichever is larger. One rule, computed per side so a thick bid book
-    does not blank the asks (or the other way around).
+    A level is a wall if its notional is ≥ 1.5× the median of *this* side,
+    or ≥ 20% of this side's visible notional. Either is enough. Fewer than
+    ``WALL_MIN_LEVELS`` rows: no walls, cutoffs omitted.
     """
     notionals: List[float] = []
     for lvl in levels:
         notional = float(lvl["px"]) * float(lvl["sz"])
         lvl["notional"] = notional
         notionals.append(notional)
-    if not notionals:
-        return WALL_FLOOR
-    threshold = max(WALL_MEDIAN_MULT * _median(notionals), WALL_FLOOR)
+    if len(notionals) < WALL_MIN_LEVELS:
+        for lvl in levels:
+            lvl["wall"] = False
+        return None
+    median_1_5 = WALL_MEDIAN_MULT * _median(notionals)
+    total = sum(notionals)
+    share_20 = WALL_SHARE * total
     for lvl in levels:
-        lvl["wall"] = lvl["notional"] >= threshold
-    return float(threshold)
+        n = lvl["notional"]
+        lvl["wall"] = n >= median_1_5 or n >= share_20
+    return {"median_1_5": float(median_1_5), "share_20": float(share_20)}
 
 
 def build_l2(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
