@@ -2,6 +2,8 @@
 
 Real-time, read-only liquidity and open interest instrument panel for discretionary trading.
 
+**How the pieces fit:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — diagrams of the data flow, the sampler's clock, the API and the page layout.
+
 ## Doctrine
 - **Read-only forever:** Surfaces market data, structure, and open interest regimes. Never generates trade cues, alerts, or signals.
 - **No orders:** Zero order placement or execution capabilities. Wilson's discretion is the trading brain; this dashboard is the instrument panel.
