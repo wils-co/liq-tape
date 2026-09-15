@@ -20,6 +20,8 @@ open a pull request against. Everything else has one.
 | PR8        | Panel ⑧ time × mark, one-screen layout | #8        |
 | PR9        | Real liq map (top 200 liquidationPx) | #9        |
 | PR9.5      | Second liq account set (active by turnover) | #10       |
+| —          | docs: architecture diagrams | #11       |
+| PR9.6      | Retention: archive rows older than 10 days | #12       |
 
 ## The offset
 
