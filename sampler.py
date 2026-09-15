@@ -48,6 +48,12 @@ DEFAULT_LIQ_LARGEST_INTERVAL: float = 600.0
 LIQ_ACTIVE_TOP: int = 300
 LIQ_LARGEST_TOP: int = 200
 LIQ_TIMEOUT: float = 90.0
+# Swept: a liq price the sampler's own mark traded through between two polls
+# of its account set. Kept on each line for this long after the crossing.
+LIQ_SWEPT_TTL_S: float = 1800.0
+# Mark samples held per set per coin between polls (~80 min at 12s); a set
+# that keeps failing past that is checked against the most recent window.
+LIQ_MARKS_CAP: int = 400
 LIQ_TAIL_BYTES: int = 64 * 1024
 DEFAULT_CLIENT_PATH: Path = (
     Path.home()
@@ -286,6 +292,12 @@ class LiqPoller:
     Each finished poll appends one merged line per coin carrying every set's
     latest snapshot with its own age and coverage. An account in both sets
     keeps the row from the newer poll.
+
+    Swept: the OI tick feeds every sampled mark in (`observe_mark`). When a
+    set's next snapshot lands, rows from its previous snapshot whose liq
+    price that mark path crossed are recorded with when it crossed and
+    whether the position was gone at the new poll. Each line carries the
+    swept rows from the last 30 minutes; earlier lines are never rewritten.
     """
 
     def __init__(
@@ -309,6 +321,12 @@ class LiqPoller:
         self.last_launch: Dict[str, float] = {name: 0.0 for name in sets}
         # set -> {asof_ms, requested, fetched, capped, by_coin: {coin: [rows]}}
         self.snaps: Dict[str, Dict[str, Any]] = {}
+        # set -> coin -> [(ts, mark)] observed since that set's last snapshot
+        self.marks: Dict[str, Dict[str, Deque[Tuple[float, float]]]] = {
+            name: {coin: deque(maxlen=LIQ_MARKS_CAP) for coin in coins} for name in sets
+        }
+        # coin -> swept rows, newest crossing last
+        self.swept: Dict[str, List[Dict[str, Any]]] = {coin: [] for coin in coins}
         self._seed()
 
     def _seed(self) -> None:
@@ -316,6 +334,9 @@ class LiqPoller:
             rec = last_liq_record(self.data_dir / f"liq_{coin}.jsonl")
             if rec is None:
                 continue
+            carried = rec.get("swept")
+            if isinstance(carried, list):
+                self.swept[coin] = [r for r in carried if isinstance(r, dict)]
             metas = rec.get("sets")
             if not isinstance(metas, dict):
                 # A PR9 line: one set, the largest accounts.
@@ -380,6 +401,12 @@ class LiqPoller:
         for coin in self.coins:
             rows = by_coin_raw.get(coin) if isinstance(by_coin_raw.get(coin), list) else []
             by_coin[coin] = [r for r in (slim_liq_row(row, name) for row in rows) if r]
+        previous = self.snaps.get(name)
+        if previous is not None:
+            for coin in self.coins:
+                self._sweep(coin, previous["by_coin"].get(coin) or [], by_coin[coin], self.marks[name][coin])
+        for coin in self.coins:
+            self.marks[name][coin].clear()
         self.snaps[name] = {
             "asof_ms": asof,
             "requested": payload.get("requested"),
@@ -418,11 +445,56 @@ class LiqPoller:
                     for name, snap in self.snaps.items()
                 },
                 "positions": positions,
+                "swept": self._live_swept(coin, time.time()),
             }
             append_lines(
                 self.data_dir / f"liq_{coin}.jsonl",
                 [json.dumps(record, separators=(",", ":")) + "\n"],
             )
+
+    def observe_mark(self, coin: str, ts: float, mark: Optional[float]) -> None:
+        """Record one sampled mark against every set's open window."""
+        if mark is None or coin not in self.coins:
+            return
+        for name in self.sets:
+            self.marks[name][coin].append((ts, mark))
+
+    def _sweep(
+        self,
+        coin: str,
+        before: List[Dict[str, Any]],
+        after: List[Dict[str, Any]],
+        marks: Deque[Tuple[float, float]],
+    ) -> None:
+        """Rows from the previous snapshot whose liq price the mark crossed.
+
+        Only the sampled mark counts: a wick between 12s samples, or a move
+        while the sampler was down, is missed rather than guessed.
+        """
+        if not marks:
+            return
+        still_open = {row["address"] for row in after}
+        known = {(r.get("address"), r.get("liquidation_px")) for r in self.swept[coin]}
+        for row in before:
+            px, szi = row["liquidation_px"], row["szi"]
+            crossed = None
+            for ts, mark in marks:
+                if (szi > 0 and mark <= px) or (szi < 0 and mark >= px):
+                    crossed = (ts, mark)
+                    break
+            if crossed is None or (row["address"], px) in known:
+                continue
+            self.swept[coin].append(
+                dict(row, swept_at=round(crossed[0], 3), crossed_mark=crossed[1],
+                     gone=row["address"] not in still_open)
+            )
+
+    def _live_swept(self, coin: str, now: float) -> List[Dict[str, Any]]:
+        self.swept[coin] = [
+            r for r in self.swept[coin]
+            if isinstance(r.get("swept_at"), (int, float)) and now - r["swept_at"] <= LIQ_SWEPT_TTL_S
+        ]
+        return self.swept[coin]
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -652,6 +724,8 @@ def main() -> None:
                 }
 
                 append_lines(data_dir / f"oi_{coin}.jsonl", [json.dumps(record) + "\n"])
+                if liq is not None:
+                    liq.observe_mark(coin, sample_ts, record["mark"])
                 written.append(coin)
 
             # Trades run after every OI write, concurrently, so four hung

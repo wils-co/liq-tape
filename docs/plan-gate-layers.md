@@ -123,6 +123,8 @@ Assumption 1 bit: on live data the 200 largest accounts held no liq price within
 **Rejected:** raising N on account value alone (the probe found near-zero yield below rank 200 too). **Rejected:** sorting by distance to liq (needs every account's state first). **Rejected:** two liqmap children at once (burst risk on the shared IP limit).
 
 ### PR10 — Swept vs standing
+
+**As built (cc, 2026-09-15):** swept is decided per position, not per bucket: a row from a set's previous snapshot whose liq price the sampled mark crossed before that set's next poll. Rows carry `gone` (missing at the next poll). A 30-minute TTL on each line; no rewriting. Ghosts are dashed lines with a ring at the crossing.
 **Branch:** `pr10-swept` · **Seat:** gb · **Review:** cc · **Depends:** PR9
 
 - Sampler keeps the previous liq snapshot in memory. A cluster is `swept` when mark has traded through its bucket since it was last standing. Append swept rows with `state: swept` and the notional **as last seen**, then drop them after a TTL (default 30 min) so the page does not accumulate a graveyard. Standing rows stay `state: standing`.

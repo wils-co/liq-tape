@@ -108,6 +108,11 @@ sequenceDiagram
 At most one liqmap child runs at a time, so the two account sets never burst
 the shared rate limit together.
 
+Every OI sample's mark is also handed to the liq poller. When a set's next
+snapshot lands, rows from its previous snapshot whose liq price that mark
+path crossed are recorded as **swept** and carried on each line for 30
+minutes.
+
 Once a day (00:05 UTC, and two minutes after start) a retention thread
 moves rows older than 10 days into `data/archive/`. Appends and the pass
 share per-file locks, so the tick keeps writing while it runs.
@@ -123,7 +128,7 @@ The page is static; every number comes from polling the board.
 | `/api/l2/<COIN>` | client, 2s cache | 2s | ④ L2 ladder, walls on ⑧ |
 | `/api/prints/<COIN>` | trades file + levels | 12s | prints list, ticks on ⑦ |
 | `/api/cvd/<COIN>` | trades file | 5s | CVD spark |
-| `/api/liq/<COIN>` | liq file + latest mark | 30s | liq map card, liq lines on ⑧ |
+| `/api/liq/<COIN>` | liq file + latest mark | 30s | liq map card, liq lines and swept ghosts on ⑧ |
 | `/api/funding/<COIN>` | client, 30s cache | 60s | ⑤ funding |
 | `/api/profile/<COIN>` | client candles, 60s cache | 60s | ⑦ volume profile, histogram on ⑧ |
 | `/api/levels` | levels.yaml | on load and coin change | ⑥ levels, lines on ⑧ |
