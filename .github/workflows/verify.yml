@@ -103,12 +103,15 @@ jobs:
       - name: Syntax gates
         run: |
           set -euo pipefail
-          python3 -m py_compile sampler.py server.py scripts/check_levels.py
+          python3 -m py_compile sampler.py server.py scripts/check_levels.py scripts/check_liq.py
           bash -n run_sampler.sh
           echo "syntax: clean"
 
       - name: Levels file reads
         run: python3 scripts/check_levels.py
+
+      - name: Liq map merge and dedupe
+        run: python3 scripts/check_liq.py
 
       - name: Server smoke test
         run: |

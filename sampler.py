@@ -36,9 +36,15 @@ TRADE_FIELDS: Tuple[str, ...] = ("coin", "side", "px", "sz", "time", "hash", "ti
 # liqmap: 200 leaderboard accounts × clearinghouseState (weight 2) on its own
 # slower clock. Runs in the background; the kill timeout is its own, not the
 # OI tick's.
+# Two account sets, measured 2026-09-15: of 100 accounts, the top by account
+# value held 0 liq prices within 5% of mark; the top by weekly volume /
+# equity held 11. Budget: sampler ~520/min + board ~100/min of the 1200/min
+# REST weight; 200×2 per 600s + 300×2 per 120s adds ~340/min.
 DEFAULT_LIQ_INTERVAL: float = 120.0
+DEFAULT_LIQ_LARGEST_INTERVAL: float = 600.0
+LIQ_ACTIVE_TOP: int = 300
+LIQ_LARGEST_TOP: int = 200
 LIQ_TIMEOUT: float = 90.0
-LIQ_TOP: int = 200
 LIQ_TAIL_BYTES: int = 64 * 1024
 DEFAULT_CLIENT_PATH: Path = (
     Path.home()
@@ -227,8 +233,9 @@ def fetch_markets(client_path: Path) -> Dict[str, Any]:
     return json.loads(proc.stdout)
 
 
-def last_liq_asof(path: Path) -> Optional[int]:
-    """`asof_ms` of the last line in a liq file, so a restart does not re-append it."""
+def last_liq_record(path: Path) -> Optional[Dict[str, Any]]:
+    """Newest line of a liq file, so a restart resumes each set's snapshot
+    instead of blanking the slow set until its next poll."""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -243,82 +250,174 @@ def last_liq_asof(path: Path) -> Optional[int]:
         except json.JSONDecodeError:
             continue
         if isinstance(rec, dict) and isinstance(rec.get("asof_ms"), int):
-            return rec["asof_ms"]
+            return rec
     return None
 
 
-class LiqPoller:
-    """Runs `liqmap` in the background on its own slower clock.
+def slim_liq_row(row: Dict[str, Any], liq_set: str) -> Optional[Dict[str, Any]]:
+    """The fields /api/liq reads, rounded. The file is per coin, so `coin`
+    is dropped; `set` says which account ranking the row came from."""
+    try:
+        return {
+            "address": str(row["address"]),
+            "szi": round(float(row["szi"]), 6),
+            "liquidation_px": float(f"{float(row['liquidation_px']):.7g}"),
+            "position_value": round(float(row["position_value"]), 0),
+            "set": liq_set,
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
 
-    The OI tick only ever calls `tick()`, which launches, checks, or kills the
-    child without waiting on it — a hung liqmap cannot delay an OI write.
-    Output goes to an unnamed temp file, not a pipe, so a large payload can
-    never block the child on a full pipe buffer while nobody is reading.
+
+class LiqPoller:
+    """Runs `liqmap` in the background, one account set at a time.
+
+    Two sets on their own clocks: `largest` (by account value; far liq
+    prices, slow) and `active` (weekly volume / equity; near liq prices,
+    fast). At most one child runs, so the sets never burst the shared
+    1200/min REST weight together. The OI tick only ever calls `tick()`,
+    which launches, checks, or kills the child without waiting on it — a
+    hung liqmap cannot delay an OI write. Output goes to an unnamed temp
+    file, not a pipe, so a large payload cannot block the child.
+
+    Each finished poll appends one merged line per coin carrying every set's
+    latest snapshot with its own age and coverage. An account in both sets
+    keeps the row from the newer poll.
     """
 
     def __init__(
-        self, client_path: Path, coins: List[str], data_dir: Path, every: float, timeout: float
+        self,
+        client_path: Path,
+        coins: List[str],
+        data_dir: Path,
+        sets: Dict[str, Dict[str, float]],
+        timeout: float,
     ) -> None:
         self.client_path = client_path
         self.coins = coins
         self.data_dir = data_dir
-        self.every = every
+        self.sets = sets
         self.timeout = timeout
         self.proc: Optional[subprocess.Popen] = None
+        self.running_set: Optional[str] = None
         self.out: Any = None
         self.err: Any = None
         self.started = 0.0
-        self.last_launch = 0.0
-        self.last_asof: Dict[str, Optional[int]] = {
-            coin: last_liq_asof(data_dir / f"liq_{coin}.jsonl") for coin in coins
-        }
+        self.last_launch: Dict[str, float] = {name: 0.0 for name in sets}
+        # set -> {asof_ms, requested, fetched, capped, by_coin: {coin: [rows]}}
+        self.snaps: Dict[str, Dict[str, Any]] = {}
+        self._seed()
+
+    def _seed(self) -> None:
+        for coin in self.coins:
+            rec = last_liq_record(self.data_dir / f"liq_{coin}.jsonl")
+            if rec is None:
+                continue
+            metas = rec.get("sets")
+            if not isinstance(metas, dict):
+                # A PR9 line: one set, the largest accounts.
+                metas = {
+                    "largest": {k: rec.get(k) for k in ("asof_ms", "requested", "fetched", "capped")}
+                }
+            for name, meta in metas.items():
+                if name not in self.sets or not isinstance(meta, dict):
+                    continue
+                if not isinstance(meta.get("asof_ms"), int):
+                    continue
+                snap = self.snaps.get(name)
+                if snap is None:
+                    snap = {k: meta.get(k) for k in ("asof_ms", "requested", "fetched", "capped")}
+                    snap["by_coin"] = {}
+                    self.snaps[name] = snap
+                rows = [
+                    r for r in rec.get("positions") or []
+                    if isinstance(r, dict) and r.get("set", "largest") == name
+                ]
+                snap["by_coin"][coin] = [r for r in (slim_liq_row(row, name) for row in rows) if r]
+                # A restart does not re-poll a set that is still fresh.
+                self.last_launch[name] = max(self.last_launch[name], meta["asof_ms"] / 1000.0)
 
     def tick(self, now: float) -> None:
         if self.proc is None:
-            if now - self.last_launch >= self.every:
-                self._launch(now)
+            due = [
+                name for name, cfg in self.sets.items()
+                if now - self.last_launch[name] >= cfg["every"]
+            ]
+            if due:
+                self._launch(min(due, key=lambda name: self.last_launch[name]), now)
             return
         if self.proc.poll() is None:
             if now - self.started > self.timeout:
                 self.proc.kill()
                 self.proc.wait()
-                _log(f"liqmap killed after {self.timeout:.0f}s")
+                _log(f"liqmap ({self.running_set}) killed after {self.timeout:.0f}s")
                 self._close()
             return
         try:
             if self.proc.returncode != 0:
                 self.err.seek(0)
                 raise RuntimeError(
-                    f"liqmap exited with code {self.proc.returncode}: "
+                    f"liqmap ({self.running_set}) exited with code {self.proc.returncode}: "
                     f"{self.err.read().decode('utf-8', errors='replace').strip()}"
                 )
             self.out.seek(0)
-            self.write(json.loads(self.out.read().decode("utf-8")))
+            self.absorb(self.running_set or "", json.loads(self.out.read().decode("utf-8")))
+            self.write()
         except Exception as exc:
-            _log(f"liqmap poll error: {exc}")
+            _log(f"liqmap ({self.running_set}) poll error: {exc}")
         finally:
             self._close()
 
-    def write(self, payload: Dict[str, Any]) -> None:
+    def absorb(self, name: str, payload: Dict[str, Any]) -> None:
         asof = payload.get("asof_ms")
-        if not isinstance(asof, int):
-            raise ValueError("liqmap payload has no asof_ms")
-        by_coin = payload.get("by_coin") or {}
+        if name not in self.sets or not isinstance(asof, int):
+            raise ValueError("liqmap payload has no asof_ms or an unknown set")
+        by_coin_raw = payload.get("by_coin") or {}
+        by_coin: Dict[str, List[Dict[str, Any]]] = {}
         for coin in self.coins:
-            if self.last_asof.get(coin) == asof:
-                continue
-            rows = by_coin.get(coin)
+            rows = by_coin_raw.get(coin) if isinstance(by_coin_raw.get(coin), list) else []
+            by_coin[coin] = [r for r in (slim_liq_row(row, name) for row in rows) if r]
+        self.snaps[name] = {
+            "asof_ms": asof,
+            "requested": payload.get("requested"),
+            "fetched": payload.get("fetched"),
+            "capped": bool(payload.get("capped")),
+            "by_coin": by_coin,
+        }
+
+    def write(self) -> None:
+        if not self.snaps:
+            return
+        newest_first = sorted(self.snaps.items(), key=lambda kv: -kv[1]["asof_ms"])
+        for coin in self.coins:
+            seen: Set[str] = set()
+            positions: List[Dict[str, Any]] = []
+            for _name, snap in newest_first:
+                for row in snap["by_coin"].get(coin) or []:
+                    if row["address"] in seen:
+                        continue
+                    seen.add(row["address"])
+                    positions.append(row)
             record = {
-                "asof_ms": asof,
+                "asof_ms": newest_first[0][1]["asof_ms"],
                 "coin": coin,
-                "requested": payload.get("requested"),
-                "fetched": payload.get("fetched"),
-                "capped": bool(payload.get("capped")),
-                "positions": rows if isinstance(rows, list) else [],
+                "requested": sum(int(s["requested"] or 0) for s in self.snaps.values()),
+                "fetched": sum(int(s["fetched"] or 0) for s in self.snaps.values()),
+                "capped": any(bool(s["capped"]) for s in self.snaps.values()),
+                "sets": {
+                    name: {
+                        "asof_ms": snap["asof_ms"],
+                        "requested": snap["requested"],
+                        "fetched": snap["fetched"],
+                        "capped": snap["capped"],
+                        "interval_s": self.sets[name]["every"],
+                    }
+                    for name, snap in self.snaps.items()
+                },
+                "positions": positions,
             }
             with open(self.data_dir / f"liq_{coin}.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-            self.last_asof[coin] = asof
+                f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -326,8 +425,9 @@ class LiqPoller:
             self.proc.wait()
         self._close()
 
-    def _launch(self, now: float) -> None:
-        self.last_launch = now
+    def _launch(self, name: str, now: float) -> None:
+        self.last_launch[name] = now
+        self.running_set = name
         self.out = tempfile.TemporaryFile()
         self.err = tempfile.TemporaryFile()
         cmd = [
@@ -336,8 +436,10 @@ class LiqPoller:
             "liqmap",
             "--coins",
             ",".join(self.coins),
+            "--set",
+            name,
             "--top",
-            str(LIQ_TOP),
+            str(int(self.sets[name]["top"])),
             "--json",
         ]
         try:
@@ -352,6 +454,7 @@ class LiqPoller:
             if handle is not None:
                 handle.close()
         self.proc = None
+        self.running_set = None
         self.out = None
         self.err = None
 
@@ -401,7 +504,13 @@ def parse_args() -> argparse.Namespace:
         "--liq-interval",
         type=float,
         default=DEFAULT_LIQ_INTERVAL,
-        help=f"Seconds between liqmap polls (default: {DEFAULT_LIQ_INTERVAL:.0f})",
+        help=f"Seconds between polls of the active account set (default: {DEFAULT_LIQ_INTERVAL:.0f})",
+    )
+    parser.add_argument(
+        "--liq-largest-interval",
+        type=float,
+        default=DEFAULT_LIQ_LARGEST_INTERVAL,
+        help=f"Seconds between polls of the largest account set (default: {DEFAULT_LIQ_LARGEST_INTERVAL:.0f})",
     )
     return parser.parse_args()
 
@@ -426,13 +535,24 @@ def main() -> None:
     liq: Optional[LiqPoller] = None
     if not args.no_liq:
         liq = LiqPoller(
-            client_path, coins, data_dir, max(30.0, args.liq_interval), LIQ_TIMEOUT
+            client_path,
+            coins,
+            data_dir,
+            {
+                "active": {"top": LIQ_ACTIVE_TOP, "every": max(30.0, args.liq_interval)},
+                "largest": {"top": LIQ_LARGEST_TOP, "every": max(30.0, args.liq_largest_interval)},
+            },
+            LIQ_TIMEOUT,
         )
+
+    liq_desc = "off" if liq is None else ", ".join(
+        f"{name} {cfg['top']:.0f}@{cfg['every']:.0f}s" for name, cfg in liq.sets.items()
+    )
 
     # Required single startup line
     print(
         f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}"
-        f" | liq: {'off' if liq is None else f'{liq.every:.0f}s'}",
+        f" | liq: {liq_desc}",
         flush=True,
     )
 
