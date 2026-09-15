@@ -104,8 +104,8 @@
   svg { display: block; width: 100%; height: auto; margin: 0 auto; }
 
   /* One screen: ⑧ is the large left canvas with the book and prints under
-     it; the OI matrix is a side card with funding beneath. Below 960px the
-     columns dissolve and the cards stack ⑧, matrix, book, funding. */
+     it; the OI matrix and the liq map are side cards. Below 960px the
+     columns dissolve and the cards stack ⑧, matrix, book, liq map. */
   .board { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; align-items: start; }
   .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
@@ -116,7 +116,6 @@
     #quad-card { order: 2; }
     #under { order: 3; }
     #liq-panel { order: 4; }
-    #fund-panel { order: 5; }
   }
   @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
 
@@ -227,8 +226,18 @@
   .trow.bid span:nth-child(2) { color: var(--green); }
   .trow.ask span:nth-child(2) { color: var(--red); }
 
-  /* Below the fold: ⑥ and ⑦ share a row. Both are also on ⑧ as overlays. */
-  .pair.below { margin-top: 12px; }
+  /* Below the fold: ⑤ ⑥ ⑦ share one row. Flex rather than a 3-column grid so
+     a hidden panel (no levels for this coin, profile chip off) gives its
+     width to the others instead of leaving a hole. ⑥ and ⑦ are also on ⑧. */
+  .below { display: flex; gap: 12px; align-items: flex-start; margin-top: 12px; }
+  .below > .panel { flex: 1 1 0; min-width: 0; }
+  /* ⑤ is drawn on a 300-wide canvas and ⑥ ⑦ on 480, so at 1400px each renders
+     near 1:1 instead of one panel's text shrinking while another's swells. */
+  .below > #fund-panel { flex: 0 0 300px; }
+  @media (max-width: 960px) {
+    .below { flex-direction: column; align-items: stretch; }
+    .below > #fund-panel { flex: 1 1 auto; }
+  }
   .panel-head .toggle button { padding: 4px 10px; font-size: 12px; }
 
   /* Liq card: sized for the 300px side column, under the matrix. */
@@ -371,32 +380,32 @@
         <div class="veil on" id="liq-veil"><p id="liq-veil-text">waiting for a liq snapshot</p></div>
       </div>
 
-      <div class="panel" id="fund-panel">
-        <div class="panel-head">
-          <h2>⑤ funding · 24h</h2>
-          <span class="note" id="fund-note"></span>
-        </div>
-        <svg id="funding" viewBox="0 0 300 200" role="img" aria-label="hourly funding rate and premium over the last 24 hours"></svg>
-        <dl class="mini">
-          <div><dt>latest</dt><dd id="f-latest">—</dd></div>
-          <div><dt>24h avg</dt><dd id="f-avg">—</dd></div>
-          <div><dt>premium</dt><dd id="f-premium">—</dd></div>
-        </dl>
-        <div class="veil on" id="fund-veil"><p id="fund-veil-text">waiting for funding history</p></div>
-      </div>
-
     </div>
 
   </div>
 
-  <div class="pair below">
+  <div class="below">
+
+    <div class="panel" id="fund-panel">
+      <div class="panel-head">
+        <h2>⑤ funding · 24h</h2>
+        <span class="note" id="fund-note"></span>
+      </div>
+      <svg id="funding" viewBox="0 0 300 200" role="img" aria-label="hourly funding rate and premium over the last 24 hours"></svg>
+      <dl class="mini">
+        <div><dt>latest</dt><dd id="f-latest">—</dd></div>
+        <div><dt>24h avg</dt><dd id="f-avg">—</dd></div>
+        <div><dt>premium</dt><dd id="f-premium">—</dd></div>
+      </dl>
+      <div class="veil on" id="fund-veil"><p id="fund-veil-text">waiting for funding history</p></div>
+    </div>
 
     <div class="panel" id="levels-panel" hidden>
       <div class="panel-head">
         <h2>⑥ structure levels</h2>
         <span class="note" id="lv-note"></span>
       </div>
-      <svg id="levels" viewBox="0 0 720 260" role="img"
+      <svg id="levels" viewBox="0 0 480 240" role="img"
            aria-label="hand-maintained structure levels around the last price"></svg>
     </div>
 
@@ -410,7 +419,7 @@
         </div>
         <span class="note" id="pf-note"></span>
       </div>
-      <svg id="profile" viewBox="0 0 720 500" role="img"
+      <svg id="profile" viewBox="0 0 480 420" role="img"
            aria-label="volume at price with session VWAP and notable prints"></svg>
       <dl class="mini">
         <div><dt>session VWAP</dt><dd id="pf-vwap">—</dd></div>
@@ -1066,7 +1075,7 @@
   // plots OI delta on Y, so a price level drawn across it would be a number on
   // the wrong axis; this panel carries its own scale, centred on the last
   // price, and every line in it came out of levels.yaml by hand.
-  var LV = { W: 720, H: 260, L: 56, R: 300, T: 22, B: 22 };
+  var LV = { W: 480, H: 240, L: 56, R: 250, T: 22, B: 22 };
   var LV_PAD = 1.18;        // headroom beyond the furthest level
   var LV_FLOOR_PCT = 0.25;  // % — minimum half-range, so close levels separate
   var LV_GAP = 15;          // px between stacked labels in the viewBox
@@ -1239,7 +1248,7 @@
   // is volume in that slice. VWAP is one line; notable prints are ticks on
   // the price axis. Side B/A is bid-taker / ask-taker, matching the book
   // colours, never labelled as anything else.
-  var PF = { W: 720, H: 500, L: 72, R: 210, T: 18, B: 40 };
+  var PF = { W: 480, H: 420, L: 72, R: 100, T: 18, B: 40 };
   var profileData = null;
   var printsData = null;
 

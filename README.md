@@ -286,6 +286,10 @@ nearest one past each edge is a tag with its distance. The **liq map** card
 under the matrix shows the 2% / 5% buckets, the largest cluster, and the
 six clusters nearest mark, with coverage and age in its head.
 
+Funding ⑤ moves out of the side column: below the fold, ⑤ levels ⑥ and
+the volume profile ⑦ now share one row, and a hidden panel gives its width
+to the other two. Under 960px they stack.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every
