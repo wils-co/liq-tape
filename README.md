@@ -137,8 +137,8 @@ wrong axis.
 
 ### Theme and coins
 The page follows the system light/dark setting (`prefers-color-scheme`); every
-colour, including the ones inside the SVG panels, comes from one token set. No
-manual toggle. The header toggle covers BTC, ETH, HYPE and SOL, matching the
+colour, including the ones inside the SVG panels, comes from one token set.
+(PR9 adds an auto · light · dark toggle on top of that.) The header toggle covers BTC, ETH, HYPE and SOL, matching the
 sampler's defaults.
 
 ## Scope (PR6: volume profile + notable prints)
