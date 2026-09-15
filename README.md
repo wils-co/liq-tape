@@ -376,6 +376,36 @@ the page changes.
 late-append, crash-leftover and log cases offline in CI. Back up
 `data/archive/` off this machine; it is still the only copy.
 
+## Scope (PR10: swept vs standing)
+
+A **swept** cluster is one whose liq price the sampler's own mark traded
+through between two polls of its account set. Standing clusters are the
+positions still open at the latest poll.
+
+- **How it is decided:** the OI tick hands every sampled mark to the liq
+  poller. When a set's next snapshot lands, each row from its previous
+  snapshot is checked against the marks seen in between — a long is swept if
+  a mark was at or below its liq price, a short at or above. Only sampled
+  marks count: a wick between 12s samples, or a move while the sampler was
+  down, is missed rather than guessed.
+- **What is kept:** the row as last seen (size, liq price, set), `swept_at`
+  (the first sample that crossed), `crossed_mark`, and `gone` — whether the
+  position was missing at the new poll. `gone` cannot tell a liquidation from
+  the owner closing; it is reported, not interpreted.
+- **How long:** every `liq_<COIN>.jsonl` line carries the swept rows from the
+  last **30 minutes**. Earlier lines are never rewritten, so the history of
+  what was swept stays in the file (and, after 10 days, the archive).
+
+`/api/liq/<COIN>` adds `swept` (clusters built like standing ones, plus
+`state: swept`, `swept_at`, `age_s`, `gone`), `swept_30m` (notional,
+long/short, clusters, positions, gone), `swept_ttl_s` and `swept_note`.
+
+On ⑧ a swept cluster in range is a dashed ghost line at its old liq price
+with a ring where the mark crossed it; it is not in the right-edge strip,
+which stays standing size. The card adds a **swept 30m** row and lists the
+three newest swept clusters in grey, struck through, as "was $X · 4m ago".
+Nothing here says what price will do next.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every

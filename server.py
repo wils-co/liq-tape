@@ -106,6 +106,11 @@ LIQ_YOUNG_NOTE: str = "no liq snapshot yet — sampler liqmap polls every 120s"
 # A PR9 line has no `sets`; it was the 200 largest accounts polled at 120s.
 LIQ_LEGACY_SET: str = "largest"
 LIQ_LEGACY_INTERVAL_S: float = 120.0
+LIQ_SWEPT_TTL_S: float = 1800.0
+LIQ_SWEPT_NOTE: str = (
+    "swept = the sampler's 12s mark traded through the liq price between two "
+    "polls; a wick between samples is missed"
+)
 
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
@@ -381,7 +386,10 @@ def read_last_json_line(path: Path, max_bytes: int) -> Optional[Dict[str, Any]]:
 
 
 def cluster_liq(
-    positions: List[Dict[str, Any]], coin: str, bin_pct: float = LIQ_BIN_PCT
+    positions: List[Dict[str, Any]],
+    coin: str,
+    bin_pct: float = LIQ_BIN_PCT,
+    one_per_address: bool = True,
 ) -> List[Dict[str, Any]]:
     """Group liq rows for one coin into per-side price clusters.
 
@@ -401,7 +409,7 @@ def cluster_liq(
         # One account holds one position per coin; a second row for the same
         # address (an account in both sets) is the older poll's copy.
         address = str(row.get("address") or "").lower()
-        if address:
+        if address and one_per_address:
             if address in seen_addresses:
                 continue
             seen_addresses.add(address)
@@ -457,6 +465,46 @@ def _near_bucket(clusters: List[Dict[str, Any]], mark: float, pct: float) -> Dic
     }
 
 
+def _swept_view(
+    rows: Any, coin: str, now: float
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Cluster the line's swept rows the same way as standing ones.
+
+    One account can be swept at two prices, so rows are not collapsed per
+    address here. Each cluster adds the newest crossing time in it and how
+    many of its positions were gone at the next poll.
+    """
+    if not isinstance(rows, list):
+        return [], None
+    live = [
+        r for r in rows
+        if isinstance(r, dict)
+        and isinstance(r.get("swept_at"), (int, float))
+        and 0 <= now - r["swept_at"] <= LIQ_SWEPT_TTL_S
+    ]
+    clusters = cluster_liq(live, coin, one_per_address=False)
+    for cluster in clusters:
+        members = [
+            r for r in live
+            if cluster["lo"] <= (_to_float(r.get("liquidation_px")) or 0) <= cluster["hi"]
+            and ((_to_float(r.get("szi")) or 0) > 0) == (cluster["side"] == "long")
+        ]
+        last = max((r["swept_at"] for r in members), default=None)
+        cluster["state"] = "swept"
+        cluster["swept_at"] = last
+        cluster["age_s"] = round(now - last, 1) if last is not None else None
+        cluster["gone"] = sum(1 for r in members if r.get("gone"))
+    summary = {
+        "notional": round(sum(c["notional"] for c in clusters), 2),
+        "long_notional": round(sum(c["notional"] for c in clusters if c["side"] == "long"), 2),
+        "short_notional": round(sum(c["notional"] for c in clusters if c["side"] == "short"), 2),
+        "clusters": len(clusters),
+        "positions": sum(c["positions"] for c in clusters),
+        "gone": sum(c["gone"] for c in clusters),
+    }
+    return clusters, summary
+
+
 def build_liq(data_dir: Path, coin: str, now: float) -> Dict[str, Any]:
     """Latest liqmap snapshot for one coin, clustered, with distance buckets.
 
@@ -477,6 +525,10 @@ def build_liq(data_dir: Path, coin: str, now: float) -> Dict[str, Any]:
         "within_2pct": None,
         "within_5pct": None,
         "largest": None,
+        "swept": [],
+        "swept_30m": None,
+        "swept_ttl_s": LIQ_SWEPT_TTL_S,
+        "swept_note": LIQ_SWEPT_NOTE,
     }
 
     oi_path = data_dir / f"oi_{coin}.jsonl"
@@ -528,6 +580,8 @@ def build_liq(data_dir: Path, coin: str, now: float) -> Dict[str, Any]:
     if clusters:
         top = max(clusters, key=lambda c: c["notional"])
         payload["largest"] = {k: top[k] for k in ("px", "side", "notional", "wallets")}
+
+    payload["swept"], payload["swept_30m"] = _swept_view(snap.get("swept"), coin, now)
 
     mark = payload["mark"]
     if mark and mark > 0:

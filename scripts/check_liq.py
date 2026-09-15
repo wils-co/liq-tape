@@ -26,6 +26,52 @@ def payload(asof_ms: int, rows: list) -> dict:
     return {"asof_ms": asof_ms, "requested": 3, "fetched": 3, "capped": False, "by_coin": {"BTC": rows}}
 
 
+def check_swept(now_ms: int) -> None:
+    """Swept: the sampled mark crossed a liq price between two polls."""
+    now = now_ms / 1000.0
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp)
+        (data / "oi_BTC.jsonl").write_text(json.dumps({"ts": now, "mark": 99000.0}) + "\n")
+        sets = {"active": {"top": 3, "every": 120.0}}
+        poller = LiqPoller(Path("/nonexistent/client.py"), ["BTC"], data, sets, 90.0)
+
+        first = [row("0xL", 1, 99500.0, 5e6), row("0xS", -1, 101000.0, 2e6), row("0xK", 1, 98000.0, 1e6)]
+        poller.absorb("active", payload(now_ms - 120_000, first))
+
+        # Mark falls through 0xL's long liq at 99.5k, never reaches 98k or 101k.
+        for i, mark in enumerate([100000.0, 99800.0, 99450.0, 99200.0]):
+            poller.observe_mark("BTC", now - 100 + i * 12, mark)
+        # 0xL is gone at the next poll; 0xS and 0xK still stand.
+        poller.absorb("active", payload(now_ms, [row("0xS", -1, 101000.0, 2e6), row("0xK", 1, 98000.0, 1e6)]))
+        poller.write()
+
+        line = json.loads((data / "liq_BTC.jsonl").read_text().splitlines()[-1])
+        swept = line["swept"]
+        assert [(r["address"], r["gone"], r["crossed_mark"]) for r in swept] == [("0xL", True, 99450.0)], swept
+        assert abs(swept[0]["swept_at"] - (now - 76)) < 1, swept
+
+        served = build_liq(data, "BTC", now)
+        assert [(c["side"], c["state"], c["gone"], c["notional"]) for c in served["swept"]] == [("long", "swept", 1, 5e6)]
+        assert served["swept_30m"]["long_notional"] == 5e6 and served["swept_30m"]["short_notional"] == 0
+        assert sorted(c["px"] for c in served["clusters"]) == [98000.0, 101000.0], "swept row still standing"
+
+        # No marks observed since the last poll: nothing can be called swept.
+        poller.absorb("active", payload(now_ms + 1000, [row("0xK", 1, 98000.0, 1e6)]))
+        assert len(poller.swept["BTC"]) == 1
+
+        # A restart carries the swept rows from the file tail.
+        again = LiqPoller(Path("/nonexistent/client.py"), ["BTC"], data, sets, 90.0)
+        assert [r["address"] for r in again.swept["BTC"]] == ["0xL"]
+
+        # Past the 30-minute TTL the row leaves the next line; old lines keep it.
+        poller.write()
+        assert poller._live_swept("BTC", now + 1801) == []
+        poller.write()
+        lines = (data / "liq_BTC.jsonl").read_text().splitlines()
+        assert json.loads(lines[0])["swept"], "an earlier line was rewritten"
+        assert build_liq(data, "BTC", now + 1801)["swept"] == []
+
+
 def main() -> int:
     now_ms = int(time.time() * 1000)
     with tempfile.TemporaryDirectory() as tmp:
@@ -65,6 +111,8 @@ def main() -> int:
         served = build_liq(data, "BTC", time.time())
         assert list(served["coverage"]["sets"]) == ["largest"], served["coverage"]
         assert len(served["clusters"]) == 1, served["clusters"]
+
+    check_swept(now_ms)
 
     # The same address twice in one list clusters once.
     dup = [row("0xE", -1, 100000.0, 1e6), row("0xE", -1, 100000.0, 1e6)]

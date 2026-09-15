@@ -273,7 +273,7 @@
   .panel-head .toggle button { padding: 4px 10px; font-size: 12px; }
 
   /* Liq card: sized for the 300px side column, under the matrix. */
-  .liqrow { display: grid; grid-template-columns: 54px auto 1fr; gap: 6px; font-size: 11px;
+  .liqrow { display: grid; grid-template-columns: 66px auto 1fr; gap: 6px; font-size: 11px;
             font-variant-numeric: tabular-nums; padding: 2px 0; align-items: baseline; }
   .liqrow dt { margin: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
   .liqrow dd { margin: 0; text-align: right; white-space: nowrap; }
@@ -286,6 +286,10 @@
   .crow.head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
   .crow .dist { color: var(--muted); }
   .clist .empty { color: var(--faint); padding: 2px 0; }
+  /* Swept rows are history, not standing size: greyed, price struck through. */
+  .crow.swept { color: var(--faint); }
+  .crow.swept span:first-child { text-decoration: line-through; opacity: 0.8; }
+  .crow.swept-head { margin-top: 4px; }
 
   footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
 </style>
@@ -333,7 +337,7 @@
       <button type="button" data-theme-choice="dark" aria-pressed="false">dark</button>
     </div>
   </div>
-  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest and most active accounts, not modeled OI · stops / tp need a later PR</p>
+  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest and most active accounts, not modeled OI · swept = crossed by the 12s mark · stops / tp need a later PR</p>
 
   <div class="board">
 
@@ -414,6 +418,7 @@
           <div class="liqrow"><dt>≤ 2%</dt><dd class="big" id="liq-2">—</dd><dd id="liq-2s">—</dd></div>
           <div class="liqrow"><dt>≤ 5%</dt><dd class="big" id="liq-5">—</dd><dd id="liq-5s">—</dd></div>
           <div class="liqrow"><dt>largest</dt><dd class="big" id="liq-big">—</dd><dd id="liq-bigs">—</dd></div>
+          <div class="liqrow" title="liq prices the sampler's 12s mark traded through in the last 30 minutes"><dt>swept 30m</dt><dd class="big" id="liq-sw">—</dd><dd id="liq-sws">—</dd></div>
         </dl>
         <div class="clist" id="liq-list"><div class="empty">waiting for a liq snapshot</div></div>
         <div class="veil on" id="liq-veil"><p id="liq-veil-text">waiting for a liq snapshot</p></div>
@@ -484,7 +489,10 @@
     <code>liquidationPx</code> for open positions in two tracked account sets: the 300 most
     active by weekly volume ÷ account value (at least $100k equity), polled every 2 minutes,
     and the 200 largest by account value, polled every 10 — grouped within 0.25%. Not a
-    model of open interest, and not the accounts outside those two sets. Data is the local sampler's append-only files and the official
+    model of open interest, and not the accounts outside those two sets. A swept cluster is
+    one whose liq price the sampler's own 12s mark traded through between two polls; it
+    stays as a dashed ghost for 30 minutes with its last-seen size, and "gone" counts
+    positions missing at the next poll. A wick between samples is missed, not guessed. Data is the local sampler's append-only files and the official
     read-only client.
   </footer>
 
@@ -1600,6 +1608,28 @@
              '" height="4" fill="' + cc + '" opacity="0.8">' + tip + "</rect>";
       }
       if (showLiqHist) s += text(liqX0 + 2, H - 6, "liq", { size: 9, anchor: "start", fill: "var(--faint)" });
+    }
+
+    // Swept clusters in range: a dashed ghost line at the old liq price and a
+    // hollow ring where the sampled mark crossed it. Not part of the strip —
+    // that is standing size only.
+    var sweptList = layers.liq && liqData && liqData.swept ? liqData.swept : [];
+    for (i = 0; i < sweptList.length; i++) {
+      var sc = sweptList[i];
+      if (!(sc.px >= pmin && sc.px <= pmax)) continue;
+      var scol = "var(--liq-" + liqSideLabel(sc.side) + ")";
+      var sy = yOf(sc.px);
+      var stip = "<title>" + esc("swept " + liqSideLabel(sc.side) + " liq " + fmtPx(sc.px, centre) + "  was " +
+        fmtNotional(sc.notional) + "  " + (duration(sc.age_s) || "") + " ago  " + sc.gone + "/" + sc.positions + " gone") + "</title>";
+      s += '<line x1="' + x0 + '" y1="' + sy.toFixed(1) + '" x2="' + x1 + '" y2="' + sy.toFixed(1) +
+           '" stroke="' + scol + '" stroke-width="1.25" stroke-dasharray="4 4" opacity="0.45">' + stip + "</line>";
+      if (typeof sc.swept_at === "number" && sc.swept_at >= t0 && sc.swept_at <= t1) {
+        s += '<circle cx="' + xOf(sc.swept_at).toFixed(1) + '" cy="' + sy.toFixed(1) + '" r="4" fill="var(--card)" stroke="' +
+             scol + '" stroke-width="1.5">' + stip + "</circle>";
+      }
+    }
+
+    if (liqClusters.length) {
       [[liqAbove, y0 + 12, "↑ "], [liqBelow, y1 - 6, "↓ "]].forEach(function (edge) {
         var ec = edge[0];
         if (!ec) return;
@@ -1712,6 +1742,7 @@
   // here ranks a cluster beyond distance from mark and size.
   var LIQ_STALE_POLLS = 3;    // a set older than three of its own intervals is flagged
   var LIQ_LIST_ROWS = 6;
+  var LIQ_SWEPT_ROWS = 3;     // newest swept clusters listed under the standing ones
   var liqData = null;
 
   function liqSideLabel(side) { return side === "long" ? "long" : "short"; }
@@ -1793,7 +1824,31 @@
       });
       list.innerHTML = html;
     }
+    renderSwept(data);
     drawP8();
+  }
+
+  // Swept clusters: the row gives the 30-minute total, the list the newest
+  // few as "was $X · 4m ago". "gone" counts positions missing at the next
+  // poll — closed out, or closed by their owner; the data cannot tell which.
+  function renderSwept(data) {
+    var sum = data && data.swept_30m;
+    if (!sum) { el("liq-sw").textContent = "—"; el("liq-sws").textContent = "—"; return; }
+    setLiqBucket("liq-sw", sum);
+    if (sum.positions > 0) {
+      el("liq-sws").innerHTML += ' · <span class="dist">' + sum.gone + "/" + sum.positions + " gone</span>";
+    }
+    var swept = (data.swept || []).slice().sort(function (a, b) { return (b.swept_at || 0) - (a.swept_at || 0); })
+      .slice(0, LIQ_SWEPT_ROWS);
+    if (!swept.length) return;
+    var html = '<div class="crow head swept-head"><span>swept</span><span>side</span><span>was</span><span>w</span><span>ago</span></div>';
+    swept.forEach(function (c) {
+      html += '<div class="crow swept" title="' + esc(c.gone + " of " + c.positions + " gone at the next poll") + '"><span>' +
+        esc(fmtPx(c.px, data.mark)) + "</span><span>" + liqSideLabel(c.side) + "</span><span>" +
+        esc(fmtNotional(c.notional)) + "</span><span>" + c.wallets + "</span><span>" +
+        esc(duration(c.age_s) || "—") + "</span></div>";
+    });
+    el("liq-list").insertAdjacentHTML("beforeend", html);
   }
 
   function blankLiq(message) {
@@ -1803,6 +1858,8 @@
     setLiqBucket("liq-5", null);
     el("liq-big").textContent = "—";
     el("liq-bigs").textContent = "—";
+    el("liq-sw").textContent = "—";
+    el("liq-sws").textContent = "—";
     el("liq-list").innerHTML = '<div class="empty">—</div>';
     setPanelVeil("liq-veil", "liq-veil-text", true, message);
     drawP8();

@@ -22,6 +22,7 @@ open a pull request against. Everything else has one.
 | PR9.5      | Second liq account set (active by turnover) | #10       |
 | —          | docs: architecture diagrams | #11       |
 | PR9.6      | Retention: archive rows older than 10 days | #12       |
+| PR10       | Swept vs standing liq clusters | #13       |
 
 ## The offset
 
