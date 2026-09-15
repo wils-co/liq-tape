@@ -17,8 +17,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+
+from retention import DEFAULT_RETAIN_DAYS, append_lines, rotate_all
 
 DEFAULT_INTERVAL: float = 12.0
 DEFAULT_COINS: List[str] = ["BTC", "ETH", "HYPE", "SOL"]
@@ -416,8 +419,10 @@ class LiqPoller:
                 },
                 "positions": positions,
             }
-            with open(self.data_dir / f"liq_{coin}.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, separators=(",", ":")) + "\n")
+            append_lines(
+                self.data_dir / f"liq_{coin}.jsonl",
+                [json.dumps(record, separators=(",", ":")) + "\n"],
+            )
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -457,6 +462,49 @@ class LiqPoller:
         self.running_set = None
         self.out = None
         self.err = None
+
+
+class Retention:
+    """Runs the daily archive pass (retention.py) in a background thread.
+
+    First pass a couple of minutes after start, so a restart does not add a
+    file rewrite to the moment the sampler is catching up; then once per UTC
+    day, a few minutes after midnight. The OI tick only calls `tick()`, which
+    starts the thread and returns. Appends and the pass share per-file locks.
+    """
+
+    FIRST_DELAY_S: float = 120.0
+    AFTER_MIDNIGHT_S: float = 300.0
+
+    def __init__(self, data_dir: Path, retain_days: int, now: float) -> None:
+        self.data_dir = data_dir
+        self.retain_days = retain_days
+        self.next_due = now + self.FIRST_DELAY_S
+        self.thread: Optional[threading.Thread] = None
+
+    def tick(self, now: float) -> None:
+        if now < self.next_due or (self.thread is not None and self.thread.is_alive()):
+            return
+        day = 86400.0
+        self.next_due = (now // day + 1) * day + self.AFTER_MIDNIGHT_S
+        self.thread = threading.Thread(target=self._run, args=(now,), name="retention")
+        self.thread.start()
+
+    def _run(self, now: float) -> None:
+        started = time.time()
+        try:
+            summary = rotate_all(self.data_dir, self.retain_days, now)
+            _log(
+                f"retention: archived {summary['archived']} rows from {summary['files']} files"
+                f" (older than {self.retain_days}d), capped {summary['logs_capped']} logs"
+                f" in {time.time() - started:.1f}s"
+            )
+        except Exception as exc:
+            _log(f"retention error: {exc}")
+
+    def stop(self) -> None:
+        if self.thread is not None:
+            self.thread.join()
 
 
 def _log(message: str) -> None:
@@ -512,6 +560,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_LIQ_LARGEST_INTERVAL,
         help=f"Seconds between polls of the largest account set (default: {DEFAULT_LIQ_LARGEST_INTERVAL:.0f})",
     )
+    parser.add_argument(
+        "--retain-days",
+        type=int,
+        default=DEFAULT_RETAIN_DAYS,
+        help=f"Days of rows kept in the live data files; older rows move to data/archive/ (default: {DEFAULT_RETAIN_DAYS}, 0 = off)",
+    )
     return parser.parse_args()
 
 
@@ -545,6 +599,10 @@ def main() -> None:
             LIQ_TIMEOUT,
         )
 
+    retention: Optional[Retention] = None
+    if args.retain_days > 0:
+        retention = Retention(data_dir, args.retain_days, time.time())
+
     liq_desc = "off" if liq is None else ", ".join(
         f"{name} {cfg['top']:.0f}@{cfg['every']:.0f}s" for name, cfg in liq.sets.items()
     )
@@ -552,12 +610,15 @@ def main() -> None:
     # Required single startup line
     print(
         f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}"
-        f" | liq: {liq_desc}",
+        f" | liq: {liq_desc}"
+        f" | retain: {'off' if retention is None else f'{args.retain_days}d live, older archived'}",
         flush=True,
     )
 
     while running:
         loop_start = time.time()
+        if retention is not None:
+            retention.tick(loop_start)
         if liq is not None:
             try:
                 liq.tick(loop_start)
@@ -590,10 +651,7 @@ def main() -> None:
                     "premium": _to_float(m.get("premium")),
                 }
 
-                target_file = data_dir / f"oi_{coin}.jsonl"
-                line = json.dumps(record) + "\n"
-                with open(target_file, "a", encoding="utf-8") as f:
-                    f.write(line)
+                append_lines(data_dir / f"oi_{coin}.jsonl", [json.dumps(record) + "\n"])
                 written.append(coin)
 
             # Trades run after every OI write, concurrently, so four hung
@@ -617,10 +675,7 @@ def main() -> None:
                     if gate.add(tid):
                         new_lines.append(json.dumps(slim_trade(trade)) + "\n")
                 if new_lines:
-                    with open(
-                        data_dir / f"trades_{coin}.jsonl", "a", encoding="utf-8"
-                    ) as tf:
-                        tf.writelines(new_lines)
+                    append_lines(data_dir / f"trades_{coin}.jsonl", new_lines)
 
         except Exception as exc:
             now_str = datetime.datetime.now().isoformat()
@@ -636,6 +691,8 @@ def main() -> None:
 
     if liq is not None:
         liq.stop()
+    if retention is not None:
+        retention.stop()
     sys.stderr.write("Sampler shut down cleanly.\n")
     sys.stderr.flush()
 

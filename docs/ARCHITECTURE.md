@@ -25,6 +25,7 @@ flowchart LR
         direction TB
         SAMPLER["sampler.py<br/>collects · the only writer"]
         DATA[("data/<br/>oi_COIN.jsonl<br/>trades_COIN.jsonl<br/>liq_COIN.jsonl")]
+        ARCHIVE[("data/archive/<br/>per-day .jsonl.gz<br/>older than 10 days")]
         LEVELS["levels.yaml<br/>you edit by hand"]
         SERVER["server.py · the board<br/>index.html + /api/*<br/>127.0.0.1:8791"]
     end
@@ -43,6 +44,7 @@ flowchart LR
 
     CLIENT -- "markets + trades · 12s<br/>liqmap · 120s / 600s" --> SAMPLER
     SAMPLER -- "append" --> DATA
+    DATA -- "daily, rows > 10d" --> ARCHIVE
     DATA -- "file tails" --> SERVER
     LEVELS --> SERVER
     CLIENT -- "L2 · funding · candles<br/>live, cached" --> SERVER
@@ -66,7 +68,8 @@ back to Hyperliquid: no path places an order, holds a key, or writes there.
 | `data/liq_<COIN>.jsonl` | sampler | board (`/api/liq`) | when a liqmap poll finishes |
 | `levels.yaml` | you, by hand | board (`/api/levels`, prints tagging) | whenever you save |
 | leaderboard cache | client | client | refreshed after 6h |
-| `data/*.log`, `*.pid` | the run scripts | you | — |
+| `data/archive/<day>/*.jsonl.gz` | sampler (daily retention) | you, for history | rows older than 10 days, daily 00:05 UTC |
+| `data/*.log`, `*.pid` | the run scripts (logs capped by the sampler) | you | — |
 
 The server never opens a file for writing; CI greps for it.
 
@@ -104,6 +107,10 @@ sequenceDiagram
 
 At most one liqmap child runs at a time, so the two account sets never burst
 the shared rate limit together.
+
+Once a day (00:05 UTC, and two minutes after start) a retention thread
+moves rows older than 10 days into `data/archive/`. Appends and the pass
+share per-file locks, so the tick keeps writing while it runs.
 
 ## What the page asks for
 

@@ -47,6 +47,7 @@ Options:
 - `--no-liq`: Skip the background liqmap poll (PR9)
 - `--liq-interval <seconds>`: Seconds between polls of the active account set (default: `120`)
 - `--liq-largest-interval <seconds>`: Seconds between polls of the largest account set (default: `600`)
+- `--retain-days <n>`: Days of rows kept in the live data files; older rows move to `data/archive/` (default: `10`, `0` = off)
 
 ### Run as background daemon
 ```bash
@@ -340,6 +341,41 @@ capped or older than three of its own intervals.
 **Growth:** a BTC line is ~13 KB; four coins every 120s is roughly 25–30 MB
 a day. There is no retention on any `data/` file yet.
 
+## Scope (PR9.6: retention — archive, never delete)
+
+`data/` grows about 55 MB a day (trades ~25, liq ~25, OI ~3). Hyperliquid
+has no OI-history endpoint, so this folder is the only copy: nothing is
+deleted. Once a day the sampler moves rows older than **10 days** (a full
+week plus a buffer) out of the live files into gzipped per-day archives:
+
+```
+data/oi_BTC.jsonl                          live, last 10 days
+data/archive/2026-09-12/oi_BTC.jsonl.gz    every row from that UTC day
+```
+
+Gzip shrinks liq ~11× and OI ~6×, so a year of archive is a few GB. The
+board only reads the live files (its longest window is 4h), so nothing on
+the page changes.
+
+- **When:** two minutes after the sampler starts, then daily at 00:05 UTC,
+  in a background thread. A pass over ~90 MB takes ~2s; the 12s OI tick
+  held its cadence through it.
+- **No lost rows:** every append goes through `retention.append_lines`,
+  which takes a per-file lock. The pass scans without the lock and holds it
+  only to copy rows that arrived meanwhile and swap the file.
+- **Crash safe:** archive chunks are committed (`.part` → `.ready`) before
+  the live file is replaced. A crash can at worst archive a day's rows twice;
+  it cannot drop them. Leftover `.part` files are removed and `.ready` files
+  merged on the next pass.
+- **Logs** (`data/*.log`) are noise, not history: once a log passes 10 MB it
+  is cut back to its last 5 MB.
+- **Read an archive:** `gzip -dc data/archive/2026-09-12/oi_BTC.jsonl.gz`,
+  or `gzip.open(..., "rt")` in Python.
+
+`--retain-days 0` turns it off. `scripts/check_retention.py` runs the loss,
+late-append, crash-leftover and log cases offline in CI. Back up
+`data/archive/` off this machine; it is still the only copy.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every
@@ -368,3 +404,5 @@ if any of those appears, the build fails and the pull request cannot be merged.
 - **Back it up:** Hyperliquid has no OI-history endpoint. Every hour the
   sampler records exists nowhere else but on this machine — `data/` is the
   only copy, and once the disk is gone the history is gone with it.
+  Since PR9.6 the older history is in `data/archive/` (gzipped per day);
+  back up that folder too.
