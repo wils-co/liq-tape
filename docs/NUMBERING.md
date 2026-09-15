@@ -17,6 +17,7 @@ open a pull request against. Everything else has one.
 | PR5        | Board daemon, README, docs     | #5        |
 | PR6        | Volume profile + notable prints | #6        |
 | PR7        | Walls, tape/CVD, layer chrome  | #7        |
+| PR8        | Panel ⑧ time × mark, one-screen layout | #8        |
 
 ## The offset
 

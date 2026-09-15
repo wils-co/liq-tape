@@ -86,6 +86,11 @@ CVD_YOUNG_NOTE: str = (
     "cvd needs the sampler to accumulate — sampled tape (last ~10/poll)"
 )
 
+# Mark path for panel ⑧: the sampler's 12s mark over the same lookbacks.
+# 4h is ~1200 rows; the cap keeps the payload near what one panel can draw.
+MARKS_SERIES_CAP: int = 480
+MARKS_YOUNG_NOTE: str = "waiting for data — run sampler.py"
+
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
 DEFAULT_LOOKBACK: str = "1h"
@@ -107,6 +112,7 @@ API_FUNDING_RE = re.compile(r"^/api/funding/([^/]+)$")
 API_PROFILE_RE = re.compile(r"^/api/profile/([^/]+)$")
 API_PRINTS_RE = re.compile(r"^/api/prints/([^/]+)$")
 API_CVD_RE = re.compile(r"^/api/cvd/([^/]+)$")
+API_MARKS_RE = re.compile(r"^/api/marks/([^/]+)$")
 
 # levels.yaml is human-edited, so the reader understands one documented
 # subset of YAML and names the line it could not read rather than guessing.
@@ -245,6 +251,92 @@ def build_snapshot(data_dir: Path, coin: str, lookback: str, now: float) -> Dict
         "mark_pct": _pct_delta(first.get("mark"), last.get("mark")),
         "oi_pct": _pct_delta(first.get("oi"), last.get("oi")),
     }
+    return payload
+
+
+def _downsample_marks(
+    points: List[Dict[str, Any]], cap: int
+) -> List[Dict[str, Any]]:
+    """Thin a mark path to about ``cap`` points without shaving its extremes.
+
+    A plain stride can step over a 12s spike, and a price panel that hides
+    the high it just printed is lying. Each of ``cap // 2`` time-ordered
+    buckets keeps its lowest and highest row instead. Every point returned
+    is a raw sampler row — nothing is averaged or interpolated.
+    """
+    if cap < 2 or len(points) <= cap:
+        return points
+    buckets = cap // 2
+    n = len(points)
+    out: List[Dict[str, Any]] = []
+    for b in range(buckets):
+        start = b * n // buckets
+        stop = (b + 1) * n // buckets
+        chunk = points[start:stop]
+        if not chunk:
+            continue
+        lo = min(chunk, key=lambda p: p["mark"])
+        hi = max(chunk, key=lambda p: p["mark"])
+        if lo is hi:
+            out.append(lo)
+        else:
+            out.extend(sorted((lo, hi), key=lambda p: p["ts"]))
+    # The page's "last" is the newest raw row, so the path must end on it.
+    if out[-1] is not points[-1]:
+        out.append(points[-1])
+    return out
+
+
+def build_marks(data_dir: Path, coin: str, lookback: str, now: float) -> Dict[str, Any]:
+    """The sampler's mark path for one coin over one lookback window.
+
+    ``latest`` is the newest raw row, never a downsampled one. A missing file
+    or fewer than two in-window rows is a 200 with a note and no invented
+    points.
+    """
+    window = LOOKBACKS[lookback]
+    cutoff = now - window
+    path = data_dir / f"oi_{coin}.jsonl"
+
+    payload: Dict[str, Any] = {
+        "coin": coin,
+        "lookback": lookback,
+        "lookback_seconds": window,
+        "served_at": round(now, 3),
+        "count": 0,
+        "capped": False,
+        "marks": [],
+        "latest": None,
+        "data_age": None,
+        "coverage_seconds": None,
+    }
+
+    if not path.is_file():
+        payload["note"] = MARKS_YOUNG_NOTE
+        return payload
+
+    records, capped = read_recent_records(path, cutoff)
+    payload["capped"] = capped
+
+    points: List[Dict[str, Any]] = []
+    for rec in records:
+        ts = float(rec["ts"])
+        mark = _to_float(rec.get("mark"))
+        if ts < cutoff or mark is None:
+            continue
+        points.append({"ts": ts, "mark": mark})
+
+    payload["count"] = len(points)
+    if points:
+        payload["latest"] = points[-1]
+        payload["data_age"] = round(now - points[-1]["ts"], 3)
+    if len(points) < 2:
+        payload["marks"] = points
+        payload["note"] = MARKS_YOUNG_NOTE
+        return payload
+
+    payload["coverage_seconds"] = round(points[-1]["ts"] - points[0]["ts"], 3)
+    payload["marks"] = _downsample_marks(points, MARKS_SERIES_CAP)
     return payload
 
 
@@ -1185,6 +1277,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_cvd(match.group(1), parse_qs(parsed.query))
             return
 
+        match = API_MARKS_RE.match(route)
+        if match:
+            self._send_marks(match.group(1), parse_qs(parsed.query))
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "path": route})
 
     def _send_index(self) -> None:
@@ -1414,6 +1511,50 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             payload = build_cvd(self.data_dir, coin, lookback, time.time())
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "coin": coin, "detail": str(exc)},
+            )
+            return
+
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _send_marks(self, raw_coin: str, query: Dict[str, List[str]]) -> None:
+        # Known means the sampler has written anything for this coin. The mark
+        # path lives in the oi file, so gating on that file alone would make
+        # "missing oi file" indistinguishable from an untracked coin; a coin
+        # with a trades file but no oi file yet is tracked and gets 200 + note.
+        # File reads only — no client call — so the wider gate costs nothing.
+        coin = raw_coin.upper()
+        if not COIN_RE.match(coin) or not (
+            (self.data_dir / f"oi_{coin}.jsonl").is_file()
+            or (self.data_dir / f"trades_{coin}.jsonl").is_file()
+        ):
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {
+                    "error": "unknown_coin",
+                    "coin": raw_coin,
+                    "hint": "no sampler file for this coin",
+                },
+            )
+            return
+
+        lookback = (query.get("lookback") or [DEFAULT_LOOKBACK])[0]
+        if lookback not in LOOKBACKS:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "bad_lookback",
+                    "lookback": lookback,
+                    "allowed": list(LOOKBACKS),
+                },
+            )
+            return
+
+        try:
+            payload = build_marks(self.data_dir, coin, lookback, time.time())
         except OSError as exc:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
