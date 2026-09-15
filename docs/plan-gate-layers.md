@@ -1,6 +1,6 @@
 # Plan-gate: layers (walls, liq, stops, tp, CVD)
 
-Status: Q1–Q3 decided. **PR7 merged** 2026-09-15 (`main` `83ff216`). **PR8 in flight on cc** (not gb): shrink the OI matrix + panel ⑧. Agy `docs/design-liq-map.md` is in-tree for PR9.
+Status: Q1–Q3 decided. **PR7 merged** 2026-09-15 (`83ff216`). **PR8 merged** 2026-09-15 (`2916d0a`). **PR9 on cc** (not gb), spec `~/Dev/Hermes/handoffs/liq-tape-pr9-liq-map.md` — it changes three PR9 details below: one `liqmap --coins` call instead of one per coin, liqmap runs in the background, and the leaderboard cache lives beside the client.
 Source: grok-build, 2026-09-14. Mock sent to Klud TG.
 
 This is the SSOT for gb / cc / agy. Do not fork a second plan in a handoff.

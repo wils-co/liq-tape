@@ -143,6 +143,7 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/prints/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/cvd/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/marks/DOGE)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/liq/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/nope)" = 404
 
           # Known coin, missing trades file: 200 + note, not 404.
@@ -157,6 +158,14 @@ jobs:
           curl -sf http://127.0.0.1:8791/api/marks/BTC | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['marks']) < 2 and d.get('note'), d; print('marks young:', d['note'])"
           # Downsampling keeps each bucket's high and low and ends on the newest raw row.
           python3 -c "from server import _downsample_marks as ds; pts=[{'ts':float(i),'mark':100.0} for i in range(1200)]; pts[333]['mark']=150.0; pts[777]['mark']=50.0; out=ds(pts,480); assert len(out)<=481, len(out); ms=[p['mark'] for p in out]; assert 150.0 in ms and 50.0 in ms, 'extreme shaved'; assert out[-1] is pts[-1]; assert all(a['ts']<b['ts'] for a,b in zip(out,out[1:])); print('marks downsample: ok')"
+
+          # Liq map: a tracked coin with no liq file (sampler older than the
+          # board) is 200 + note with no invented clusters.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/liq/BTC)" = 200
+          curl -sf http://127.0.0.1:8791/api/liq/BTC | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['clusters'] == [] and d['coverage'] is None and d['within_2pct'] is None and d.get('note'), d; print('liq missing-file:', d['note'])"
+          # Clustering: 5 wallets → one BTC short cluster of 2 (0.1% apart), one
+          # long singleton; the ETH row and the null-liq row are dropped.
+          python3 -c "from server import cluster_liq; fx=[{'address':'0xA','coin':'BTC','szi':-2,'liquidation_px':100000.0,'position_value':2e5},{'address':'0xB','coin':'BTC','szi':-1,'liquidation_px':100100.0,'position_value':1e5},{'address':'0xC','coin':'BTC','szi':3,'liquidation_px':90000.0,'position_value':3e5},{'address':'0xD','coin':'ETH','szi':5,'liquidation_px':3000.0,'position_value':1.5e4},{'address':'0xE','coin':'BTC','szi':1,'liquidation_px':None,'position_value':1}]; c=cluster_liq(fx,'BTC'); assert len(c)==2, c; lo,hi=c; assert (lo['side'],lo['wallets'],lo['notional'])==('long',1,3e5), lo; assert (hi['side'],hi['wallets'],hi['positions'],hi['notional'])==('short',2,2,3e5), hi; assert abs(hi['px']-(1e5*2e5+100100*1e5)/3e5)<1e-3, hi; assert (hi['lo'],hi['hi'])==(100000.0,100100.0), hi; print('liq clusters: ok')"
 
           # Wall tagging is local (no client). 1.5x median, or 20% of the
           # side's visible notional. Restoring $1M / 4.0 fails both cases.

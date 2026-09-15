@@ -16,6 +16,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
@@ -32,6 +33,13 @@ TRADES_TIMEOUT: float = 8.0
 # Fields the panel actually reads. `users` is ~40% of each row and nothing
 # consumes it; existing files keep old rows, this is append-forward.
 TRADE_FIELDS: Tuple[str, ...] = ("coin", "side", "px", "sz", "time", "hash", "tid")
+# liqmap: 200 leaderboard accounts × clearinghouseState (weight 2) on its own
+# slower clock. Runs in the background; the kill timeout is its own, not the
+# OI tick's.
+DEFAULT_LIQ_INTERVAL: float = 120.0
+LIQ_TIMEOUT: float = 90.0
+LIQ_TOP: int = 200
+LIQ_TAIL_BYTES: int = 64 * 1024
 DEFAULT_CLIENT_PATH: Path = (
     Path.home()
     / ".hermes"
@@ -219,6 +227,140 @@ def fetch_markets(client_path: Path) -> Dict[str, Any]:
     return json.loads(proc.stdout)
 
 
+def last_liq_asof(path: Path) -> Optional[int]:
+    """`asof_ms` of the last line in a liq file, so a restart does not re-append it."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - LIQ_TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("asof_ms"), int):
+            return rec["asof_ms"]
+    return None
+
+
+class LiqPoller:
+    """Runs `liqmap` in the background on its own slower clock.
+
+    The OI tick only ever calls `tick()`, which launches, checks, or kills the
+    child without waiting on it — a hung liqmap cannot delay an OI write.
+    Output goes to an unnamed temp file, not a pipe, so a large payload can
+    never block the child on a full pipe buffer while nobody is reading.
+    """
+
+    def __init__(
+        self, client_path: Path, coins: List[str], data_dir: Path, every: float, timeout: float
+    ) -> None:
+        self.client_path = client_path
+        self.coins = coins
+        self.data_dir = data_dir
+        self.every = every
+        self.timeout = timeout
+        self.proc: Optional[subprocess.Popen] = None
+        self.out: Any = None
+        self.err: Any = None
+        self.started = 0.0
+        self.last_launch = 0.0
+        self.last_asof: Dict[str, Optional[int]] = {
+            coin: last_liq_asof(data_dir / f"liq_{coin}.jsonl") for coin in coins
+        }
+
+    def tick(self, now: float) -> None:
+        if self.proc is None:
+            if now - self.last_launch >= self.every:
+                self._launch(now)
+            return
+        if self.proc.poll() is None:
+            if now - self.started > self.timeout:
+                self.proc.kill()
+                self.proc.wait()
+                _log(f"liqmap killed after {self.timeout:.0f}s")
+                self._close()
+            return
+        try:
+            if self.proc.returncode != 0:
+                self.err.seek(0)
+                raise RuntimeError(
+                    f"liqmap exited with code {self.proc.returncode}: "
+                    f"{self.err.read().decode('utf-8', errors='replace').strip()}"
+                )
+            self.out.seek(0)
+            self.write(json.loads(self.out.read().decode("utf-8")))
+        except Exception as exc:
+            _log(f"liqmap poll error: {exc}")
+        finally:
+            self._close()
+
+    def write(self, payload: Dict[str, Any]) -> None:
+        asof = payload.get("asof_ms")
+        if not isinstance(asof, int):
+            raise ValueError("liqmap payload has no asof_ms")
+        by_coin = payload.get("by_coin") or {}
+        for coin in self.coins:
+            if self.last_asof.get(coin) == asof:
+                continue
+            rows = by_coin.get(coin)
+            record = {
+                "asof_ms": asof,
+                "coin": coin,
+                "requested": payload.get("requested"),
+                "fetched": payload.get("fetched"),
+                "capped": bool(payload.get("capped")),
+                "positions": rows if isinstance(rows, list) else [],
+            }
+            with open(self.data_dir / f"liq_{coin}.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+            self.last_asof[coin] = asof
+
+    def stop(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+        self._close()
+
+    def _launch(self, now: float) -> None:
+        self.last_launch = now
+        self.out = tempfile.TemporaryFile()
+        self.err = tempfile.TemporaryFile()
+        cmd = [
+            sys.executable,
+            str(self.client_path),
+            "liqmap",
+            "--coins",
+            ",".join(self.coins),
+            "--top",
+            str(LIQ_TOP),
+            "--json",
+        ]
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=self.out, stderr=self.err)
+            self.started = now
+        except OSError as exc:
+            _log(f"liqmap launch error: {exc}")
+            self._close()
+
+    def _close(self) -> None:
+        for handle in (self.out, self.err):
+            if handle is not None:
+                handle.close()
+        self.proc = None
+        self.out = None
+        self.err = None
+
+
+def _log(message: str) -> None:
+    sys.stderr.write(f"[{datetime.datetime.now().isoformat()}] {message}\n")
+    sys.stderr.flush()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Poll mark price, open interest, funding, and premium into JSONL files."
@@ -250,6 +392,17 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_CLIENT_PATH),
         help=f"Path to hyperliquid_client.py (default: {DEFAULT_CLIENT_PATH})",
     )
+    parser.add_argument(
+        "--no-liq",
+        action="store_true",
+        help="Do not poll liquidation prices (liqmap)",
+    )
+    parser.add_argument(
+        "--liq-interval",
+        type=float,
+        default=DEFAULT_LIQ_INTERVAL,
+        help=f"Seconds between liqmap polls (default: {DEFAULT_LIQ_INTERVAL:.0f})",
+    )
     return parser.parse_args()
 
 
@@ -270,14 +423,26 @@ def main() -> None:
         coin: load_tid_gate(data_dir / f"trades_{coin}.jsonl") for coin in coins
     }
 
+    liq: Optional[LiqPoller] = None
+    if not args.no_liq:
+        liq = LiqPoller(
+            client_path, coins, data_dir, max(30.0, args.liq_interval), LIQ_TIMEOUT
+        )
+
     # Required single startup line
     print(
-        f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}",
+        f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}"
+        f" | liq: {'off' if liq is None else f'{liq.every:.0f}s'}",
         flush=True,
     )
 
     while running:
         loop_start = time.time()
+        if liq is not None:
+            try:
+                liq.tick(loop_start)
+            except Exception as exc:
+                _log(f"liqmap tick error: {exc}")
         try:
             payload = fetch_markets(client_path)
             raw_markets = payload.get("markets", [])
@@ -349,6 +514,8 @@ def main() -> None:
         while running and time.time() < target_wake:
             time.sleep(min(0.2, max(0.0, target_wake - time.time())))
 
+    if liq is not None:
+        liq.stop()
     sys.stderr.write("Sampler shut down cleanly.\n")
     sys.stderr.flush()
 
