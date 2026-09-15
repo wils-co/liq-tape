@@ -290,6 +290,10 @@ Funding ⑤ moves out of the side column: below the fold, ⑤ levels ⑥ and
 the volume profile ⑦ now share one row, and a hidden panel gives its width
 to the other two. Under 960px they stack.
 
+A **theme** chip group (auto · light · dark) sits on the controls line. auto
+follows the OS; light or dark is remembered in this browser's localStorage
+and applied before first paint.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every

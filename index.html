@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>liq-tape — time × mark, OI × price, L2 depth, funding, volume</title>
+<script>
+  // Before first paint, so a saved dark choice never flashes light.
+  try {
+    var savedTheme = localStorage.getItem("liq-tape-theme");
+    if (savedTheme === "light" || savedTheme === "dark") document.documentElement.setAttribute("data-theme", savedTheme);
+  } catch (e) {}
+</script>
 <style>
   :root {
     --paper: #fbfaf8;
@@ -25,8 +32,13 @@
     --liq-long: #6d28d9;
     --liq-short: #0e7490;
   }
+  /* Theme: the header toggle stamps data-theme on <html>; with no stamp
+     ("auto") the OS setting decides. Dark tokens are listed twice because
+     CSS cannot share one block between a media query and an attribute. */
+  :root { color-scheme: light; }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --paper: #131311;
       --card: #1c1c1a;
       --ink: #ece9e4;
@@ -45,6 +57,26 @@
       --liq-long: #a78bfa;
       --liq-short: #22d3ee;
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #131311;
+    --card: #1c1c1a;
+    --ink: #ece9e4;
+    --muted: #a8a29e;
+    --faint: #6b6764;
+    --rule: #2c2c29;
+    --rule-strong: #3a3a36;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --green: #22c55e;
+    --bid-fill: rgba(34, 197, 94, 0.18);
+    --ask-fill: rgba(239, 68, 68, 0.16);
+    --wall-bid-fill: rgba(34, 197, 94, 0.42);
+    --wall-ask-fill: rgba(239, 68, 68, 0.38);
+    --veil: rgba(19, 19, 17, 0.88);
+    --liq-long: #a78bfa;
+    --liq-short: #22d3ee;
   }
   * { box-sizing: border-box; }
   body {
@@ -292,6 +324,13 @@
       <button type="button" data-lb="1h" aria-pressed="true">1h</button>
       <button type="button" data-lb="4h" aria-pressed="false">4h</button>
       <span class="cover" id="cover-note"></span>
+    </div>
+
+    <div class="chips" id="theme" role="group" aria-label="theme">
+      <span class="label">theme</span>
+      <button type="button" data-theme-choice="auto" aria-pressed="true">auto</button>
+      <button type="button" data-theme-choice="light" aria-pressed="false">light</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">dark</button>
     </div>
   </div>
   <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest accounts, not modeled OI · stops / tp need a later PR</p>
@@ -2030,6 +2069,31 @@
     btn.setAttribute("aria-pressed", String(layers[key]));
     applyLayers();
   });
+
+  // Theme: auto follows the OS; light/dark stamp data-theme and are
+  // remembered per browser. Every SVG colour is a CSS token, so nothing
+  // needs a redraw.
+  function applyTheme(choice) {
+    var root = document.documentElement;
+    if (choice === "light" || choice === "dark") root.setAttribute("data-theme", choice);
+    else { choice = "auto"; root.removeAttribute("data-theme"); }
+    Array.prototype.forEach.call(el("theme").querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice));
+    });
+    return choice;
+  }
+
+  el("theme").addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-theme-choice]");
+    if (!btn) return;
+    var choice = applyTheme(btn.dataset.themeChoice);
+    try {
+      if (choice === "auto") localStorage.removeItem("liq-tape-theme");
+      else localStorage.setItem("liq-tape-theme", choice);
+    } catch (err) {}
+  });
+
+  applyTheme(document.documentElement.getAttribute("data-theme"));
 
   el("profile-lookbacks").addEventListener("click", function (e) {
     var btn = e.target.closest("button[data-plb]");
