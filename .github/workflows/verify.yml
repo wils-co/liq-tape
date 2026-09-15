@@ -116,7 +116,13 @@ jobs:
 
           # No data/ dir (gitignored) and no official client on the runner:
           # exactly the state a fresh clone is in, and both paths must serve.
-          python3 server.py --port 8791 --client /nonexistent/client.py &
+          # oi_BTC.jsonl is enough to make BTC a known coin so a missing trades
+          # file can be a 200 + note rather than collapsing into unknown_coin.
+          TMPDATA="$RUNNER_TEMP/liqdata"
+          mkdir -p "$TMPDATA"
+          printf '%s\n' '{"ts": 1, "mark": 1, "oi": 1}' > "$TMPDATA/oi_BTC.jsonl"
+
+          python3 server.py --port 8791 --client /nonexistent/client.py --data-dir "$TMPDATA" &
           SPID=$!
           trap 'kill $SPID 2>/dev/null || true' EXIT
           sleep 3
@@ -133,5 +139,17 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/oi/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/profile/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/prints/DOGE)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/cvd/DOGE)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/nope)" = 404
+
+          # Known coin, missing trades file: 200 + note, not 404.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/api/cvd/BTC)" = 200
+          curl -sf -o "$RUNNER_TEMP/cvd.json" http://127.0.0.1:8791/api/cvd/BTC
+          python3 -c "import json,sys; d=json.load(sys.stdin); assert d['sampled'] is True, d; assert d.get('note'), d; assert d['cvd']['latest'] is None, d; assert d['cvd']['series'] == [], d; print('cvd missing-file:', d['note'])" < "$RUNNER_TEMP/cvd.json"
+
+          # Wall tagging is local (no client). 1.5x median, or 20% of the
+          # side's visible notional. Restoring $1M / 4.0 fails both cases.
+          python3 -c "from server import _tag_side_walls, WALL_MEDIAN_MULT, WALL_SHARE; assert WALL_MEDIAN_MULT==1.5 and WALL_SHARE==0.20; lv=[{'px':1.0,'sz':1e5} for _ in range(14)]+[{'px':1.0,'sz':2e5}]; t=_tag_side_walls(lv); assert t['median_1_5']==150000, t; assert lv[-1]['wall'] is True and all(not x['wall'] for x in lv[:-1]); print('walls 1.5x: ok')"
+          python3 -c "from server import _tag_side_walls; lv=[{'px':1.0,'sz':1e5} for _ in range(4)]+[{'px':1.0,'sz':1.2e5}]; t=_tag_side_walls(lv); assert t['median_1_5']==150000, t; assert abs(t['share_20']-104000)<1e-6, t; assert lv[-1]['wall'] is True and all(not x['wall'] for x in lv[:-1]); print('walls share: ok')"
+
           echo "smoke: clean"

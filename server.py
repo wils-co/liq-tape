@@ -70,6 +70,22 @@ PRINTS_YOUNG_NOTE: str = (
     "prints need the sampler to accumulate — full picture in ~24h"
 )
 
+# A wall is an outlier on its own side of the 15-tick book: 1.5× that
+# side's median notional, or 20% of that side's visible notional. No
+# dollar floor — $1M never fired on live size. Fewer than 3 levels is
+# not enough of a book to call anything a wall.
+WALL_MEDIAN_MULT: float = 1.5
+WALL_SHARE: float = 0.20
+WALL_MIN_LEVELS: int = 3
+
+# Cumulative signed sampled tape. Same lookbacks as prints; the file is
+# last-~10 prints per 12s poll, not a full tape — sampled: true says so.
+DEFAULT_CVD_LOOKBACK: str = "1h"
+CVD_SERIES_CAP: int = 240
+CVD_YOUNG_NOTE: str = (
+    "cvd needs the sampler to accumulate — sampled tape (last ~10/poll)"
+)
+
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
 DEFAULT_LOOKBACK: str = "1h"
@@ -90,6 +106,7 @@ API_L2_RE = re.compile(r"^/api/l2/([^/]+)$")
 API_FUNDING_RE = re.compile(r"^/api/funding/([^/]+)$")
 API_PROFILE_RE = re.compile(r"^/api/profile/([^/]+)$")
 API_PRINTS_RE = re.compile(r"^/api/prints/([^/]+)$")
+API_CVD_RE = re.compile(r"^/api/cvd/([^/]+)$")
 
 # levels.yaml is human-edited, so the reader understands one documented
 # subset of YAML and names the line it could not read rather than guessing.
@@ -327,6 +344,42 @@ def _level(raw: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _tag_side_walls(levels: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """Add ``notional`` and ``wall`` on each level. Return this side's cutoffs.
+
+    A level is a wall if its notional is ≥ 1.5× the median of *this* side,
+    or ≥ 20% of this side's visible notional. Either is enough. Fewer than
+    ``WALL_MIN_LEVELS`` rows: no walls, cutoffs omitted.
+    """
+    notionals: List[float] = []
+    for lvl in levels:
+        notional = float(lvl["px"]) * float(lvl["sz"])
+        lvl["notional"] = notional
+        notionals.append(notional)
+    if len(notionals) < WALL_MIN_LEVELS:
+        for lvl in levels:
+            lvl["wall"] = False
+        return None
+    median_1_5 = WALL_MEDIAN_MULT * _median(notionals)
+    total = sum(notionals)
+    share_20 = WALL_SHARE * total
+    for lvl in levels:
+        n = lvl["notional"]
+        lvl["wall"] = n >= median_1_5 or n >= share_20
+    return {"median_1_5": float(median_1_5), "share_20": float(share_20)}
+
+
 def build_l2(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
     """Assemble the JSON payload for one coin's L2 book."""
     raw = run_client(client_path, ["l2", coin, "--levels", str(L2_LEVELS)])
@@ -335,6 +388,8 @@ def build_l2(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
 
     bids = [lvl for lvl in map(_level, raw.get("bids") or []) if lvl][:L2_LEVELS]
     asks = [lvl for lvl in map(_level, raw.get("asks") or []) if lvl][:L2_LEVELS]
+    bid_thr = _tag_side_walls(bids)
+    ask_thr = _tag_side_walls(asks)
 
     book_time = raw.get("time")
     payload: Dict[str, Any] = {
@@ -346,6 +401,7 @@ def build_l2(client_path: Path, coin: str, now: float) -> Dict[str, Any]:
         "asks": asks,
         "spread": None,
         "mid": None,
+        "wall_threshold": {"bids": bid_thr, "asks": ask_thr},
     }
 
     if not bids or not asks:
@@ -778,6 +834,97 @@ def build_prints(
     return payload
 
 
+def _downsample_series(
+    points: List[Dict[str, Any]], cap: int
+) -> List[Dict[str, Any]]:
+    """Keep first and last; stride the middle so a spark is not 80k points.
+
+    Latest CVD is computed over every in-window fill; this only thins the
+    series the page draws. Duplicate indices from rounding are dropped.
+    """
+    if cap <= 0 or len(points) <= cap:
+        return points
+    if cap == 1:
+        return [points[-1]]
+    out: List[Dict[str, Any]] = []
+    last_idx: Optional[int] = None
+    n = len(points)
+    for i in range(cap):
+        idx = int(round(i * (n - 1) / (cap - 1)))
+        if idx == last_idx:
+            continue
+        out.append(points[idx])
+        last_idx = idx
+    if out[-1]["time"] != points[-1]["time"]:
+        out[-1] = points[-1]
+    return out
+
+
+def build_cvd(
+    data_dir: Path,
+    coin: str,
+    lookback: str,
+    now: float,
+    max_lines: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Cumulative signed notional of the sampled tape over one lookback.
+
+    Side ``B`` adds ``px*sz``, side ``A`` subtracts. px/sz arrive as strings
+    on the jsonl and leave as floats. Missing file is empty + note, not 404.
+    """
+    window = LOOKBACKS[lookback]
+    cutoff_ms = (now - window) * 1000.0
+    path = data_dir / f"trades_{coin}.jsonl"
+
+    payload: Dict[str, Any] = {
+        "coin": coin,
+        "lookback": lookback,
+        "sampled": True,
+        "cvd": {"latest": None, "series": []},
+        "count": 0,
+        "truncated": False,
+        "window_capped": False,
+        "served_at": round(now, 3),
+    }
+
+    if not path.is_file():
+        payload["note"] = CVD_YOUNG_NOTE
+        return payload
+
+    records, window_capped = read_recent_trades(path, cutoff_ms, max_lines=max_lines)
+    payload["window_capped"] = window_capped
+
+    by_tid: Dict[int, Dict[str, Any]] = {}
+    for rec in records:
+        by_tid[rec["tid"]] = rec
+
+    in_window = [rec for rec in by_tid.values() if float(rec["time"]) >= cutoff_ms]
+    in_window.sort(key=lambda rec: (float(rec["time"]), rec["tid"]))
+
+    running = 0.0
+    series: List[Dict[str, Any]] = []
+    for rec in in_window:
+        px = _to_float(rec.get("px"))
+        sz = _to_float(rec.get("sz"))
+        side = rec.get("side")
+        if px is None or sz is None or side not in ("B", "A"):
+            continue
+        running += px * sz if side == "B" else -(px * sz)
+        series.append({"time": int(rec["time"]), "cvd": running})
+
+    payload["count"] = len(series)
+    payload["truncated"] = window_capped
+    if not series:
+        payload["note"] = CVD_YOUNG_NOTE
+        return payload
+
+    payload["cvd"] = {
+        "latest": running,
+        "series": _downsample_series(series, CVD_SERIES_CAP),
+    }
+    return payload
+
+
 def _strip_comment(line: str) -> str:
     """Drop a trailing ``#`` comment, ignoring ``#`` inside a quoted string."""
     quote = ""
@@ -1033,6 +1180,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_prints(match.group(1), parse_qs(parsed.query))
             return
 
+        match = API_CVD_RE.match(route)
+        if match:
+            self._send_cvd(match.group(1), parse_qs(parsed.query))
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "path": route})
 
     def _send_index(self) -> None:
@@ -1234,6 +1386,34 @@ class Handler(BaseHTTPRequestHandler):
                 min_notional,
                 time.time(),
             )
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "coin": coin, "detail": str(exc)},
+            )
+            return
+
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _send_cvd(self, raw_coin: str, query: Dict[str, List[str]]) -> None:
+        coin = self._resolve_coin(raw_coin)
+        if coin is None:
+            return
+
+        lookback = (query.get("lookback") or [DEFAULT_CVD_LOOKBACK])[0]
+        if lookback not in LOOKBACKS:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "bad_lookback",
+                    "lookback": lookback,
+                    "allowed": list(LOOKBACKS),
+                },
+            )
+            return
+
+        try:
+            payload = build_cvd(self.data_dir, coin, lookback, time.time())
         except OSError as exc:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
