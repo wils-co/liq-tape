@@ -91,6 +91,18 @@ CVD_YOUNG_NOTE: str = (
 MARKS_SERIES_CAP: int = 480
 MARKS_YOUNG_NOTE: str = "waiting for data — run sampler.py"
 
+# Liq map: real liquidationPx from the sampler's liqmap poll (top-N accounts
+# by accountValue, 120s). A cluster spans at most LIQ_BIN_PCT above its
+# lowest member, per side; the payload states the width.
+LIQ_BIN_PCT: float = 0.25
+LIQ_NEAR_PCTS: Tuple[float, ...] = (2.0, 5.0)
+LIQ_TAIL_BYTES: int = 256 * 1024
+LIQ_METHOD_NOTE: str = (
+    "real liquidationPx from the largest accounts by account value · "
+    "Hyperliquid only · not modeled OI · not the whole market"
+)
+LIQ_YOUNG_NOTE: str = "no liq snapshot yet — sampler liqmap polls every 120s"
+
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
 DEFAULT_LOOKBACK: str = "1h"
@@ -113,6 +125,7 @@ API_PROFILE_RE = re.compile(r"^/api/profile/([^/]+)$")
 API_PRINTS_RE = re.compile(r"^/api/prints/([^/]+)$")
 API_CVD_RE = re.compile(r"^/api/cvd/([^/]+)$")
 API_MARKS_RE = re.compile(r"^/api/marks/([^/]+)$")
+API_LIQ_RE = re.compile(r"^/api/liq/([^/]+)$")
 
 # levels.yaml is human-edited, so the reader understands one documented
 # subset of YAML and names the line it could not read rather than guessing.
@@ -337,6 +350,158 @@ def build_marks(data_dir: Path, coin: str, lookback: str, now: float) -> Dict[st
 
     payload["coverage_seconds"] = round(points[-1]["ts"] - points[0]["ts"], 3)
     payload["marks"] = _downsample_marks(points, MARKS_SERIES_CAP)
+    return payload
+
+
+def read_last_json_line(path: Path, max_bytes: int) -> Optional[Dict[str, Any]]:
+    """Newest parseable JSON object in the last ``max_bytes`` of a file."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - max_bytes))
+        tail = f.read()
+    lines = tail.split(b"\n")
+    if size > max_bytes:
+        lines = lines[1:]
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(rec, dict):
+            return rec
+    return None
+
+
+def cluster_liq(
+    positions: List[Dict[str, Any]], coin: str, bin_pct: float = LIQ_BIN_PCT
+) -> List[Dict[str, Any]]:
+    """Group liq rows for one coin into per-side price clusters.
+
+    Rows are walked in price order per side; a cluster starts at its lowest
+    liq price and takes every row within ``bin_pct`` % of that start. Fixed
+    bins were rejected: two positions 0.1% apart could land either side of a
+    bin edge. ``lo``/``hi`` are the members' actual price span, ``px`` the
+    notional-weighted liq price. Rows for another coin, with a zero size, or
+    without a finite positive liq price are dropped, not guessed.
+    """
+    by_side: Dict[str, List[Tuple[float, float, str]]] = {"long": [], "short": []}
+    for row in positions:
+        if not isinstance(row, dict) or row.get("coin") != coin:
+            continue
+        szi = _to_float(row.get("szi"))
+        px = _to_float(row.get("liquidation_px"))
+        if not szi or px is None or px <= 0:
+            continue
+        notional = abs(_to_float(row.get("position_value")) or 0.0)
+        address = str(row.get("address") or "").lower()
+        by_side["long" if szi > 0 else "short"].append((px, notional, address))
+
+    clusters: List[Dict[str, Any]] = []
+    for side, rows in by_side.items():
+        rows.sort()
+        i = 0
+        while i < len(rows):
+            limit = rows[i][0] * (1.0 + bin_pct / 100.0)
+            j = i
+            while j < len(rows) and rows[j][0] <= limit:
+                j += 1
+            members = rows[i:j]
+            notional = sum(n for _px, n, _a in members)
+            if notional > 0:
+                px = sum(p * n for p, n, _a in members) / notional
+            else:
+                px = sum(p for p, _n, _a in members) / len(members)
+            clusters.append(
+                {
+                    "px": round(px, 6),
+                    "lo": members[0][0],
+                    "hi": members[-1][0],
+                    "side": side,
+                    "notional": round(notional, 2),
+                    "wallets": len({a for _p, _n, a in members}),
+                    "positions": len(members),
+                }
+            )
+            i = j
+    clusters.sort(key=lambda c: (c["px"], c["side"]))
+    return clusters
+
+
+def _near_bucket(clusters: List[Dict[str, Any]], mark: float, pct: float) -> Dict[str, Any]:
+    # Counts positions, not wallets: distinct wallets would need addresses,
+    # which clusters deliberately do not carry.
+    inside = [c for c in clusters if abs(c["px"] - mark) / mark * 100.0 <= pct]
+    return {
+        "pct": pct,
+        "notional": round(sum(c["notional"] for c in inside), 2),
+        "long_notional": round(sum(c["notional"] for c in inside if c["side"] == "long"), 2),
+        "short_notional": round(sum(c["notional"] for c in inside if c["side"] == "short"), 2),
+        "clusters": len(inside),
+        "positions": sum(c["positions"] for c in inside),
+    }
+
+
+def build_liq(data_dir: Path, coin: str, now: float) -> Dict[str, Any]:
+    """Latest liqmap snapshot for one coin, clustered, with distance buckets.
+
+    Missing file → 200 shape with empty clusters and a note. Distances need a
+    mark; without one the buckets are null rather than measured against a
+    made-up price.
+    """
+    payload: Dict[str, Any] = {
+        "coin": coin,
+        "served_at": round(now, 3),
+        "bin_pct": LIQ_BIN_PCT,
+        "method": LIQ_METHOD_NOTE,
+        "asof": None,
+        "age_s": None,
+        "mark": None,
+        "coverage": None,
+        "clusters": [],
+        "within_2pct": None,
+        "within_5pct": None,
+        "largest": None,
+    }
+
+    oi_path = data_dir / f"oi_{coin}.jsonl"
+    if oi_path.is_file():
+        mark_rec = read_last_json_line(oi_path, CHUNK_BYTES)
+        if mark_rec is not None:
+            payload["mark"] = _to_float(mark_rec.get("mark"))
+
+    path = data_dir / f"liq_{coin}.jsonl"
+    snap = read_last_json_line(path, LIQ_TAIL_BYTES) if path.is_file() else None
+    if snap is None or not isinstance(snap.get("asof_ms"), (int, float)):
+        payload["note"] = LIQ_YOUNG_NOTE
+        return payload
+
+    asof = float(snap["asof_ms"]) / 1000.0
+    payload["asof"] = round(asof, 3)
+    payload["age_s"] = round(now - asof, 1)
+    requested = snap.get("requested")
+    fetched = snap.get("fetched")
+    payload["coverage"] = {
+        "requested": requested,
+        "fetched": fetched,
+        "capped": bool(snap.get("capped")),
+    }
+    positions = snap.get("positions") if isinstance(snap.get("positions"), list) else []
+    clusters = cluster_liq(positions, coin)
+    payload["clusters"] = clusters
+    if clusters:
+        top = max(clusters, key=lambda c: c["notional"])
+        payload["largest"] = {k: top[k] for k in ("px", "side", "notional", "wallets")}
+
+    mark = payload["mark"]
+    if mark and mark > 0:
+        payload["within_2pct"] = _near_bucket(clusters, mark, LIQ_NEAR_PCTS[0])
+        payload["within_5pct"] = _near_bucket(clusters, mark, LIQ_NEAR_PCTS[1])
+    if not clusters:
+        payload["note"] = "no positions with a finite liquidationPx in this snapshot"
     return payload
 
 
@@ -1282,6 +1447,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_marks(match.group(1), parse_qs(parsed.query))
             return
 
+        match = API_LIQ_RE.match(route)
+        if match:
+            self._send_liq(match.group(1))
+            return
+
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found", "path": route})
 
     def _send_index(self) -> None:
@@ -1598,6 +1768,35 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             payload = build_snapshot(self.data_dir, coin, lookback, time.time())
+        except OSError as exc:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "read_failed", "coin": coin, "detail": str(exc)},
+            )
+            return
+
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _send_liq(self, raw_coin: str) -> None:
+        # Same "known" gate as marks: any sampler file for the coin. A tracked
+        # coin whose sampler predates liqmap gets 200 + note, not 404.
+        coin = raw_coin.upper()
+        if not COIN_RE.match(coin) or not any(
+            (self.data_dir / f"{kind}_{coin}.jsonl").is_file()
+            for kind in ("oi", "trades", "liq")
+        ):
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {
+                    "error": "unknown_coin",
+                    "coin": raw_coin,
+                    "hint": "no sampler file for this coin",
+                },
+            )
+            return
+
+        try:
+            payload = build_liq(self.data_dir, coin, time.time())
         except OSError as exc:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,

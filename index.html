@@ -21,6 +21,9 @@
     --wall-bid-fill: rgba(21, 128, 61, 0.38);
     --wall-ask-fill: rgba(185, 28, 28, 0.34);
     --veil: rgba(251, 250, 248, 0.88);
+    /* Liq sides get their own hues so a band is never read as a bid/ask wall. */
+    --liq-long: #6d28d9;
+    --liq-short: #0e7490;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -39,6 +42,8 @@
       --wall-bid-fill: rgba(34, 197, 94, 0.42);
       --wall-ask-fill: rgba(239, 68, 68, 0.38);
       --veil: rgba(19, 19, 17, 0.88);
+      --liq-long: #a78bfa;
+      --liq-short: #22d3ee;
     }
   }
   * { box-sizing: border-box; }
@@ -110,7 +115,8 @@
     #p8-panel { order: 1; }
     #quad-card { order: 2; }
     #under { order: 3; }
-    #fund-panel { order: 4; }
+    #liq-panel { order: 4; }
+    #fund-panel { order: 5; }
   }
   @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
 
@@ -225,6 +231,21 @@
   .pair.below { margin-top: 12px; }
   .panel-head .toggle button { padding: 4px 10px; font-size: 12px; }
 
+  /* Liq card: sized for the 300px side column, under the matrix. */
+  .liqrow { display: grid; grid-template-columns: 54px auto 1fr; gap: 6px; font-size: 11px;
+            font-variant-numeric: tabular-nums; padding: 2px 0; align-items: baseline; }
+  .liqrow dt { margin: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+  .liqrow dd { margin: 0; text-align: right; white-space: nowrap; }
+  .liqrow dd.big { font-size: 14px; font-weight: 500; }
+  .liq-long { color: var(--liq-long); }
+  .liq-short { color: var(--liq-short); }
+  .clist { margin-top: 6px; border-top: 1px solid var(--rule); padding-top: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .crow { display: grid; grid-template-columns: 1fr 34px 1fr 26px 44px; gap: 4px; padding: 1px 0; }
+  .crow span:nth-child(n+3) { text-align: right; }
+  .crow.head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+  .crow .dist { color: var(--muted); }
+  .clist .empty { color: var(--faint); padding: 2px 0; }
+
   footer { margin-top: 22px; font-size: 12px; color: var(--faint); line-height: 1.6; }
 </style>
 </head>
@@ -249,7 +270,7 @@
     <div class="chips layers" id="layers" role="group" aria-label="layers">
       <span class="label">layers</span>
       <button type="button" data-layer="walls" aria-pressed="true">walls</button>
-      <button type="button" data-layer="liq" disabled title="needs a later PR">liq</button>
+      <button type="button" data-layer="liq" aria-pressed="true">liq</button>
       <button type="button" data-layer="stops" disabled title="needs a later PR">stops</button>
       <button type="button" data-layer="tp" disabled title="needs a later PR">tp</button>
       <button type="button" data-layer="profile" aria-pressed="true">profile</button>
@@ -264,7 +285,7 @@
       <span class="cover" id="cover-note"></span>
     </div>
   </div>
-  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq / stops / tp need a later PR</p>
+  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest accounts, not modeled OI · stops / tp need a later PR</p>
 
   <div class="board">
 
@@ -336,6 +357,20 @@
         </dl>
       </div>
 
+      <div class="panel" id="liq-panel">
+        <div class="panel-head">
+          <h2>liq map</h2>
+          <span class="note" id="liq-note"></span>
+        </div>
+        <dl>
+          <div class="liqrow"><dt>≤ 2%</dt><dd class="big" id="liq-2">—</dd><dd id="liq-2s">—</dd></div>
+          <div class="liqrow"><dt>≤ 5%</dt><dd class="big" id="liq-5">—</dd><dd id="liq-5s">—</dd></div>
+          <div class="liqrow"><dt>largest</dt><dd class="big" id="liq-big">—</dd><dd id="liq-bigs">—</dd></div>
+        </dl>
+        <div class="clist" id="liq-list"><div class="empty">waiting for a liq snapshot</div></div>
+        <div class="veil on" id="liq-veil"><p id="liq-veil-text">waiting for a liq snapshot</p></div>
+      </div>
+
       <div class="panel" id="fund-panel">
         <div class="panel-head">
           <h2>⑤ funding · 24h</h2>
@@ -396,8 +431,11 @@
     or above 1.5× the median notional of that side of the book, or 20% of that side's
     visible notional. CVD is the cumulative signed sampled tape (last ~10 prints per poll),
     not a full book. Panel ⑧ is the sampler's 12s mark over the lookback; wall lines on it
-    are scaled to the largest wall on screen, and its histogram is volume at price, not
-    liquidations. Data is the local sampler's append-only files and the official
+    are scaled to the largest wall on screen. Its right edge carries volume at price and,
+    beside it, liquidation notional at price. Liq bands are the exchange's own
+    <code>liquidationPx</code> for open positions in the 200 largest accounts by account
+    value, polled every 120s and grouped within 0.25% — not a model of open interest, and
+    not the crowded mid-size accounts outside that set. Data is the local sampler's append-only files and the official
     read-only client.
   </footer>
 
@@ -432,7 +470,7 @@
   var PREM_FLOOR_PCT = 0.02;
 
   var state = { coin: "BTC", lookback: "1h", profileLookback: "24h" };
-  var layers = { walls: true, profile: true, cvd: true };
+  var layers = { walls: true, liq: true, profile: true, cvd: true };
   var generation = 0;       // a response from a superseded coin/lookback is dropped
   var profileEpoch = 0;     // profile lookback is independent of the quadrant chips
   var l2Data = null;
@@ -804,6 +842,7 @@
   function applyLayers() {
     el("tape-cvd").hidden = !layers.cvd;
     el("profile-panel").hidden = !layers.profile;
+    el("liq-panel").hidden = !layers.liq;
     if (l2Data) renderL2(l2Data);
     else drawP8();
   }
@@ -1357,6 +1396,7 @@
   var P8_PAD = 0.12;          // headroom above and below the path, as a share of its range
   var P8_FLOOR_PCT = 0.05;    // % — minimum half-range, so a quiet window is not magnified
   var P8_WALL_MAX_W = 5;      // stroke width of the largest wall on screen
+  var P8_LIQ_MAX_W = 4;       // extra stroke width of the largest liq cluster in view
   var P8_STALE_S = 60;
   var LOOKBACK_SECONDS = { "15m": 900, "1h": 3600, "4h": 14400 };
   var marksData = null;
@@ -1447,8 +1487,28 @@
     s += text((x0 + x1) / 2, H - 6, clockOf((t0 + t1) / 2 * 1000), { size: 10 });
     s += text(x1, H - 6, clockOf(t1 * 1000), { size: 10, anchor: "end" });
 
-    // Right-edge histogram: the ⑦ volume profile, clipped to this price range.
-    if (layers.profile && profileData && !profileData.error && profileData.buckets && profileData.buckets.length) {
+    // Right edge: volume at price and liq notional at price share the strip.
+    // With both on, each gets half and its own label, so neither reads as
+    // the other.
+    var showVol = layers.profile && profileData && !profileData.error && profileData.buckets && profileData.buckets.length;
+    var liqClusters = layers.liq && liqData && liqData.clusters ? liqData.clusters : [];
+    // Clusters do not stretch the Y domain; the nearest one past each edge
+    // gets a tag instead of a band.
+    var inView = [], liqAbove = null, liqBelow = null, maxLiq = 0;
+    for (i = 0; i < liqClusters.length; i++) {
+      var lc = liqClusters[i];
+      if (lc.px < pmin) { if (!liqBelow || lc.px > liqBelow.px) liqBelow = lc; continue; }
+      if (lc.px > pmax) { if (!liqAbove || lc.px < liqAbove.px) liqAbove = lc; continue; }
+      inView.push(lc);
+      maxLiq = Math.max(maxLiq, lc.notional);
+    }
+    var showLiqHist = inView.length > 0;
+    var volW = showVol && showLiqHist ? P8.HIST / 2 - 2 : P8.HIST;
+    var liqX0 = showVol ? hx0 + volW + 4 : hx0;
+    var liqW = showVol ? P8.HIST - volW - 4 : P8.HIST;
+    if (showVol || showLiqHist) s += line(hx0, y0, hx0, y1, "var(--rule-strong)", 1);
+
+    if (showVol) {
       var buckets = profileData.buckets, visible = [], maxVol = 0;
       for (i = 0; i < buckets.length; i++) {
         var b = buckets[i];
@@ -1456,16 +1516,49 @@
         visible.push(b);
         maxVol = Math.max(maxVol, b.vol);
       }
-      s += line(hx0, y0, hx0, y1, "var(--rule-strong)", 1);
       for (i = 0; i < visible.length && maxVol > 0; i++) {
         var vb = visible[i];
         var top = yOf(Math.min(vb.hi, pmax)), bot = yOf(Math.max(vb.lo, pmin));
-        s += '<rect x="' + hx0 + '" y="' + top.toFixed(2) + '" width="' + (vb.vol / maxVol * P8.HIST).toFixed(2) +
+        s += '<rect x="' + hx0 + '" y="' + top.toFixed(2) + '" width="' + (vb.vol / maxVol * volW).toFixed(2) +
              '" height="' + Math.max(0.5, bot - top - 0.5).toFixed(2) + '" fill="var(--ink)" opacity="0.2"><title>' +
              esc(fmtPx(vb.lo) + " – " + fmtPx(vb.hi) + "  vol " + fmtSize(vb.vol)) + "</title></rect>";
       }
-      s += text(hx0 + 2, H - 6, "vol · " + (profileData.lookback || state.profileLookback),
+      s += text(hx0 + 2, H - 6, showLiqHist ? "vol" : "vol · " + (profileData.lookback || state.profileLookback),
         { size: 9, anchor: "start", fill: "var(--faint)" });
+    }
+
+    // Liq clusters: a line at each cluster's notional-weighted price, width
+    // scaled to the largest cluster in view, over a faint band for its
+    // actual price span; a matching bar in the strip. A cluster's members sit
+    // at a few discrete prices, so the span is context, never the mark.
+    if (liqClusters.length) {
+      for (i = 0; i < inView.length && maxLiq > 0; i++) {
+        var c = inView[i];
+        var cc = "var(--liq-" + liqSideLabel(c.side) + ")";
+        var share = c.notional / maxLiq;
+        var cy = yOf(c.px);
+        var tip = "<title>" + esc(liqSideLabel(c.side) + " liq " + fmtPx(c.px, centre) + "  " + fmtNotional(c.notional) +
+          "  " + c.wallets + " wallet" + (c.wallets === 1 ? "" : "s")) + "</title>";
+        var stop = yOf(Math.min(c.hi, pmax)), sbot = yOf(Math.max(c.lo, pmin));
+        if (sbot - stop >= 2) {
+          s += '<rect x="' + x0 + '" y="' + stop.toFixed(2) + '" width="' + (x1 - x0) + '" height="' + (sbot - stop).toFixed(2) +
+               '" fill="' + cc + '" opacity="0.06">' + tip + "</rect>";
+        }
+        s += '<line x1="' + x0 + '" y1="' + cy.toFixed(1) + '" x2="' + x1 + '" y2="' + cy.toFixed(1) +
+             '" stroke="' + cc + '" stroke-width="' + (1.5 + P8_LIQ_MAX_W * share).toFixed(2) +
+             '" opacity="' + (0.45 + 0.4 * share).toFixed(2) + '">' + tip + "</line>";
+        s += '<rect x="' + liqX0 + '" y="' + (cy - 2).toFixed(2) + '" width="' + Math.max(1, share * liqW).toFixed(2) +
+             '" height="4" fill="' + cc + '" opacity="0.8">' + tip + "</rect>";
+      }
+      if (showLiqHist) s += text(liqX0 + 2, H - 6, "liq", { size: 9, anchor: "start", fill: "var(--faint)" });
+      [[liqAbove, y0 + 12, "↑ "], [liqBelow, y1 - 6, "↓ "]].forEach(function (edge) {
+        var ec = edge[0];
+        if (!ec) return;
+        var dist = " · " + ((ec.px - last.mark) / last.mark * 100).toFixed(1) + "%";
+        s += text(x1 - 6, edge[1], edge[2] + liqSideLabel(ec.side) + " liq " + fmtPx(ec.px, centre) + " " +
+          fmtNotional(ec.notional) + dist,
+          { size: 10, anchor: "end", fill: "var(--liq-" + liqSideLabel(ec.side) + ")", halo: true });
+      });
     }
 
     // levels.yaml: same line styles as ⑥, label on the line's left end.
@@ -1560,6 +1653,96 @@
     parts.push("mark · 12s sampler");
     setP8Note(parts.join(" · "), data.capped || stale ? "flag" : "");
     setPanelVeil("p8-veil", "p8-veil-text", false, "");
+    drawP8();
+  }
+
+  // ---- liq map ------------------------------------------------------------
+
+  // Real liquidationPx clusters from the sampler's liqmap snapshot. The card
+  // reads the payload as served; ⑧ draws the same clusters as bands. Nothing
+  // here ranks a cluster beyond distance from mark and size.
+  var LIQ_STALE_S = 360;      // three missed 120s polls
+  var LIQ_LIST_ROWS = 6;
+  var liqData = null;
+
+  function liqSideLabel(side) { return side === "long" ? "long" : "short"; }
+
+  function setLiqBucket(id, bucket) {
+    if (!bucket) { el(id).textContent = "—"; el(id + "s").innerHTML = "—"; return; }
+    el(id).textContent = fmtNotional(bucket.notional);
+    el(id + "s").innerHTML = bucket.notional > 0
+      ? '<span class="liq-long">L ' + esc(fmtNotional(bucket.long_notional)) + '</span> · <span class="liq-short">S ' +
+        esc(fmtNotional(bucket.short_notional)) + "</span>"
+      : '<span class="dist">none</span>';
+  }
+
+  function renderLiq(data) {
+    liqData = data;
+    var clusters = data && data.clusters ? data.clusters : [];
+    var cov = data && data.coverage;
+    if (!data || data.asof == null) {
+      el("liq-note").textContent = "";
+      setPanelVeil("liq-veil", "liq-veil-text", true, (data && data.note) || "waiting for a liq snapshot");
+      drawP8();
+      return;
+    }
+    setPanelVeil("liq-veil", "liq-veil-text", false, "");
+
+    var parts = [];
+    if (cov) parts.push((cov.fetched != null ? cov.fetched : "?") + " of " + (cov.requested != null ? cov.requested : "?") + " largest");
+    var stale = typeof data.age_s === "number" && data.age_s > LIQ_STALE_S;
+    if (typeof data.age_s === "number") parts.push(ageText(data.age_s));
+    var note = el("liq-note");
+    note.textContent = parts.join(" · ");
+    note.className = (cov && cov.capped) || stale ? "note flag" : "note";
+    note.title = data.method || "";
+
+    setLiqBucket("liq-2", data.within_2pct);
+    setLiqBucket("liq-5", data.within_5pct);
+    if (data.largest) {
+      el("liq-big").textContent = fmtNotional(data.largest.notional);
+      el("liq-bigs").innerHTML = '<span class="liq-' + liqSideLabel(data.largest.side) + '">' +
+        esc(fmtPx(data.largest.px, data.mark)) + "</span> · " + data.largest.wallets + "w";
+    } else {
+      el("liq-big").textContent = "—";
+      el("liq-bigs").textContent = "—";
+    }
+
+    var list = el("liq-list");
+    if (!clusters.length) {
+      list.innerHTML = '<div class="empty">' + esc(data.note || "no clusters in this snapshot") + "</div>";
+    } else {
+      var mark = data.mark;
+      var rows = clusters.slice();
+      if (mark > 0) {
+        rows.sort(function (a, b) { return Math.abs(a.px - mark) - Math.abs(b.px - mark); });
+      } else {
+        rows.sort(function (a, b) { return b.notional - a.notional; });
+      }
+      rows = rows.slice(0, LIQ_LIST_ROWS);
+      rows.sort(function (a, b) { return b.px - a.px; });
+      var html = '<div class="crow head"><span>liq px</span><span>side</span><span>notional</span><span>w</span><span>dist</span></div>';
+      rows.forEach(function (c) {
+        var dist = mark > 0 ? ((c.px - mark) / mark * 100) : null;
+        html += '<div class="crow"><span class="liq-' + liqSideLabel(c.side) + '">' + esc(fmtPx(c.px, mark)) +
+          "</span><span>" + liqSideLabel(c.side) + "</span><span>" + esc(fmtNotional(c.notional)) +
+          "</span><span>" + c.wallets + '</span><span class="dist">' +
+          (dist == null ? "—" : (dist > 0 ? "+" : "") + dist.toFixed(1) + "%") + "</span></div>";
+      });
+      list.innerHTML = html;
+    }
+    drawP8();
+  }
+
+  function blankLiq(message) {
+    liqData = null;
+    el("liq-note").textContent = "";
+    setLiqBucket("liq-2", null);
+    setLiqBucket("liq-5", null);
+    el("liq-big").textContent = "—";
+    el("liq-bigs").textContent = "—";
+    el("liq-list").innerHTML = '<div class="empty">—</div>';
+    setPanelVeil("liq-veil", "liq-veil-text", true, message);
     drawP8();
   }
 
@@ -1736,6 +1919,20 @@
     }
   });
 
+  // The snapshot changes every 120s; 30s keeps the age honest without
+  // re-reading an unchanged file every few seconds.
+  var liqPoller = createPoller({
+    intervalMs: 30000,
+    url: function () { return "/api/liq/" + encodeURIComponent(state.coin); },
+    onData: function (ok, body) {
+      if (!ok || (body && body.error)) { blankLiq(reasonFor(body, "no liq snapshot for " + state.coin)); return; }
+      renderLiq(body);
+    },
+    onFail: function (timedOut) {
+      blankLiq(timedOut ? "server not responding — is server.py running?" : "server unreachable — is server.py running?");
+    }
+  });
+
   var cvdPoller = createPoller({
     intervalMs: 5000,
     url: function () {
@@ -1783,6 +1980,7 @@
     renderTape({ prints: [], note: "waiting for prints" });
     blankCvd("");
     blankP8("waiting for data — run sampler.py");
+    blankLiq("waiting for a liq snapshot");
     applyLayers();
     oiPoller.restart();
     marksPoller.restart();
@@ -1791,6 +1989,7 @@
     profilePoller.restart();
     printsPoller.restart();
     cvdPoller.restart();
+    liqPoller.restart();
   }
 
   el("coins").addEventListener("click", function (e) {

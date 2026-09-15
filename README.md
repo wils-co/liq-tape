@@ -42,6 +42,8 @@ Options:
 - `--data-dir <path>`: Directory where `.jsonl` files are stored (default: `data/`)
 - `--coins <COIN1,COIN2,...>`: Comma-separated list of coins (default: `BTC,ETH,HYPE,SOL`)
 - `--client <path>`: Path to `hyperliquid_client.py`
+- `--no-liq`: Skip the background liqmap poll (PR9)
+- `--liq-interval <seconds>`: Seconds between liqmap polls (default: `120`)
 
 ### Run as background daemon
 ```bash
@@ -242,7 +244,47 @@ axis:
 - **volume** — the ⑦ profile as a thin histogram on the right edge, clipped
   to the plotted range and labelled `vol`. The `profile` chip hides it and ⑦.
 
-liq / stops / tp stay disabled; ⑧ draws no bands for them.
+stops / tp stay disabled; ⑧ draws no bands for them. liq is live from PR9.
+
+## Scope (PR9: real liq map)
+
+Real `liquidationPx` from Hyperliquid for open positions in the **200
+largest accounts by account value** — the exchange's own number, not a
+leverage-tier model of open interest. That set shows whale-sized fuel; it
+misses crowded mid-size leverage outside the leaderboard top, and the page
+says so. Hyperliquid only.
+
+### Where the data comes from
+The official client (outside this repo) gained `liqmap --coins BTC,ETH,HYPE,SOL
+--top 200 --json`. It resolves the top-N addresses from Hyperliquid's public
+leaderboard file (cached for 6h beside the client; it is ~37 MB), then reads
+each account's `clearinghouseState` with a pool of five. One call covers
+every coin — each account state already carries all of them. Rows with a
+zero size or a null liq price are dropped. It never reads your own address.
+
+The sampler runs it **in the background** every 120s and appends one line
+per coin to `data/liq_<COIN>.jsonl` (`asof_ms`, `requested`, `fetched`,
+`capped`, `positions`). The OI tick never waits on it: a liqmap still
+running after 90s is killed and logged, and the 12s cadence holds.
+Sampler flags: `--no-liq`, `--liq-interval <seconds>` (minimum 30).
+
+### API
+`GET /api/liq/<COIN>` reads the newest snapshot. Per side, positions whose
+liq prices sit within **0.25%** of a cluster's lowest member form one
+cluster: `{px, lo, hi, side, notional, wallets, positions}`, where `px` is
+notional-weighted. Addresses are not served. Top level: `within_2pct` and
+`within_5pct` (notional, long/short split, positions) measured from the
+sampler's latest mark, `largest`, `coverage {requested, fetched, capped}`,
+`age_s`, `bin_pct`, `method`. A coin with no sampler file is **404**; a
+tracked coin with no liq file is **200** with empty clusters and a `note`.
+
+### Panel
+The `liq` chip is live. On ⑧ each cluster in range is a band over its price
+span, opacity scaled to the largest in view, with a matching bar in the
+right-edge strip beside `vol`. Clusters do not stretch the price axis; the
+nearest one past each edge is a tag with its distance. The **liq map** card
+under the matrix shows the 2% / 5% buckets, the largest cluster, and the
+six clusters nearest mark, with coverage and age in its head.
 
 ## How it watches
 
