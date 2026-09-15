@@ -208,6 +208,42 @@ methodology line that they need a later PR. Under L2, a compact list of
 CVD spark under that list. Methodology: `HL only · sampled tape (last
 ~10/poll) · not a full book` describes CVD, not the prints list.
 
+## Scope (PR8: panel ⑧ time × mark, one-screen layout)
+
+The board now fits one screen at ~1400×900. Panel ⑧ is the large left
+canvas; the OI × price matrix is a 280×260 side card with its readout and
+funding under it; L2 depth and notable prints sit under ⑧. Levels ⑥ and
+the volume profile ⑦ are below the fold. On desktop the L2 ladder reads
+bids | asks side by side so all 30 levels land on the first screen; narrow
+screens keep the stacked ladder and stack ⑧, matrix, book, funding.
+
+### Mark path
+`GET /api/marks/<COIN>?lookback=15m|1h|4h` (default `1h`) returns
+`{ts, mark}` rows from the sampler's `oi_<COIN>.jsonl` — the same 12s mark,
+not a new feed. Past 480 points the path is thinned by keeping each time
+bucket's lowest and highest row, so a spike is never stepped over; every
+point is still a raw sampler row, and `latest` is always the newest raw row.
+A coin with no sampler file at all is **404**. A tracked coin with no oi
+file yet, or fewer than two rows in the window, is **200** with a `note`
+and no invented points; the page veils ⑧ until the path exists.
+`/api/oi` keeps its contract.
+
+### Panel ⑧
+X is time over the chosen lookback, ending at serve time, so a short or
+stale series reads as a short line. Y is mark price. Overlays share that
+axis:
+- **walls** — a horizontal line per tagged L2 level, stroke width scaled to
+  the largest wall on screen; the largest per side is labelled with its
+  notional. Repainted from the 2s book poll without refetching the path.
+  The `walls` chip hides them here and un-bolds them on L2.
+- **levels.yaml** — the same line styles as ⑥, labelled on the line. A
+  level outside the plotted range is an edge tag (↑ / ↓), not a squashed
+  axis.
+- **volume** — the ⑦ profile as a thin histogram on the right edge, clipped
+  to the plotted range and labelled `vol`. The `profile` chip hides it and ⑦.
+
+liq / stops / tp stay disabled; ⑧ draws no bands for them.
+
 ## How it watches
 
 The sampler invokes Hyperliquid's official info client as a subprocess every
