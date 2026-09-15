@@ -1,6 +1,6 @@
 # Plan-gate: layers (walls, liq, stops, tp, CVD)
 
-Status: Q1–Q3 decided. **PR7 merged** 2026-09-15 (`83ff216`). **PR8 merged** 2026-09-15 (`2916d0a`). **PR9 on cc** (not gb), spec `~/Dev/Hermes/handoffs/liq-tape-pr9-liq-map.md` — it changes three PR9 details below: one `liqmap --coins` call instead of one per coin, liqmap runs in the background, and the leaderboard cache lives beside the client.
+Status: Q1–Q3 decided. **PR7 merged** 2026-09-15 (`83ff216`). **PR8 merged** (`2916d0a`). **PR9 merged** (`f4a8fd8`) — it departs from the plan below in four ways: one `liqmap --coins` call, liqmap in the background, the leaderboard cache beside the client, and clusters as runs within 0.25%. **PR9.5 on cc** (inserted before PR10): a second, turnover-ranked account set — see below.
 Source: grok-build, 2026-09-14. Mock sent to Klud TG.
 
 This is the SSOT for gb / cc / agy. Do not fork a second plan in a handoff.
@@ -114,6 +114,13 @@ agy writes the design first (endpoint names, pagination, what `liquidationPx` nu
 **Rejected:** CoinGlass-style leverage-tier model. **Rejected:** polling 4000 wallets at 12s. **Rejected:** putting addresses in `levels.yaml`.
 
 **Done when:** a local `liqmap BTC --json` returns rows; the board shows clusters whose wallet counts match the fixture; coverage is visible when fetch < requested; OI jsonl cadence unchanged under a hung liqmap (force a timeout in a local test).
+
+### PR9.5 — A second account set (inserted 2026-09-15)
+**Branch:** `pr9.5-liq-universe` · **Seat:** cc · **Depends:** PR9
+
+Assumption 1 bit: on live data the 200 largest accounts held no liq price within 5% of mark on any coin. A probe of 100 accounts per ranking found week volume ÷ equity (equity ≥ $100k) held 11 within 5%, against 0 for account value. Add an `active` set (300 by that ratio, 120s) and slow `largest` to 600s; one liqmap at a time; one merged line per coin with per-set age and coverage; dedupe accounts in both sets. Budget ~340/min of liq weight against ~620/min for sampler + board. Full numbers: README § PR9.5.
+
+**Rejected:** raising N on account value alone (the probe found near-zero yield below rank 200 too). **Rejected:** sorting by distance to liq (needs every account's state first). **Rejected:** two liqmap children at once (burst risk on the shared IP limit).
 
 ### PR10 — Swept vs standing
 **Branch:** `pr10-swept` · **Seat:** gb · **Review:** cc · **Depends:** PR9

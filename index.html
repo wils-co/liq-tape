@@ -333,7 +333,7 @@
       <button type="button" data-theme-choice="dark" aria-pressed="false">dark</button>
     </div>
   </div>
-  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest accounts, not modeled OI · stops / tp need a later PR</p>
+  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest and most active accounts, not modeled OI · stops / tp need a later PR</p>
 
   <div class="board">
 
@@ -481,9 +481,10 @@
     not a full book. Panel ⑧ is the sampler's 12s mark over the lookback; wall lines on it
     are scaled to the largest wall on screen. Its right edge carries volume at price and,
     beside it, liquidation notional at price. Liq bands are the exchange's own
-    <code>liquidationPx</code> for open positions in the 200 largest accounts by account
-    value, polled every 120s and grouped within 0.25% — not a model of open interest, and
-    not the crowded mid-size accounts outside that set. Data is the local sampler's append-only files and the official
+    <code>liquidationPx</code> for open positions in two tracked account sets: the 300 most
+    active by weekly volume ÷ account value (at least $100k equity), polled every 2 minutes,
+    and the 200 largest by account value, polled every 10 — grouped within 0.25%. Not a
+    model of open interest, and not the accounts outside those two sets. Data is the local sampler's append-only files and the official
     read-only client.
   </footer>
 
@@ -1709,7 +1710,7 @@
   // Real liquidationPx clusters from the sampler's liqmap snapshot. The card
   // reads the payload as served; ⑧ draws the same clusters as bands. Nothing
   // here ranks a cluster beyond distance from mark and size.
-  var LIQ_STALE_S = 360;      // three missed 120s polls
+  var LIQ_STALE_POLLS = 3;    // a set older than three of its own intervals is flagged
   var LIQ_LIST_ROWS = 6;
   var liqData = null;
 
@@ -1736,14 +1737,27 @@
     }
     setPanelVeil("liq-veil", "liq-veil-text", false, "");
 
-    var parts = [];
-    if (cov) parts.push((cov.fetched != null ? cov.fetched : "?") + " of " + (cov.requested != null ? cov.requested : "?") + " largest");
-    var stale = typeof data.age_s === "number" && data.age_s > LIQ_STALE_S;
-    if (typeof data.age_s === "number") parts.push(ageText(data.age_s));
+    // One entry per account set, each with its own coverage and age: the
+    // active set refreshes every 2 min, the largest every 10, and the head
+    // must not let the fresher one vouch for the older one.
+    var parts = [], flagged = false, tips = [];
+    var sets = cov && cov.sets ? cov.sets : {};
+    ["active", "largest"].forEach(function (name) {
+      var st = sets[name];
+      if (!st) return;
+      var short = st.fetched != null && st.requested != null && st.fetched < st.requested
+        ? st.fetched + "/" + st.requested : String(st.requested != null ? st.requested : "?");
+      var age = typeof st.age_s === "number" ? duration(st.age_s) : null;
+      parts.push(short + " " + name + (age ? " " + age : ""));
+      if (st.capped) flagged = true;
+      if (typeof st.age_s === "number" && st.interval_s > 0 && st.age_s > LIQ_STALE_POLLS * st.interval_s) flagged = true;
+      tips.push(name + ": " + (st.fetched != null ? st.fetched : "?") + " of " + st.requested + " accounts, " +
+        (age ? age + " old" : "age unknown") + (st.interval_s ? ", polled every " + duration(st.interval_s) : ""));
+    });
     var note = el("liq-note");
     note.textContent = parts.join(" · ");
-    note.className = (cov && cov.capped) || stale ? "note flag" : "note";
-    note.title = data.method || "";
+    note.className = flagged ? "note flag" : "note";
+    note.title = tips.concat([data.method || ""]).join("\n");
 
     setLiqBucket("liq-2", data.within_2pct);
     setLiqBucket("liq-5", data.within_5pct);

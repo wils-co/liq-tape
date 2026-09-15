@@ -43,7 +43,8 @@ Options:
 - `--coins <COIN1,COIN2,...>`: Comma-separated list of coins (default: `BTC,ETH,HYPE,SOL`)
 - `--client <path>`: Path to `hyperliquid_client.py`
 - `--no-liq`: Skip the background liqmap poll (PR9)
-- `--liq-interval <seconds>`: Seconds between liqmap polls (default: `120`)
+- `--liq-interval <seconds>`: Seconds between polls of the active account set (default: `120`)
+- `--liq-largest-interval <seconds>`: Seconds between polls of the largest account set (default: `600`)
 
 ### Run as background daemon
 ```bash
@@ -293,6 +294,49 @@ to the other two. Under 960px they stack.
 A **theme** chip group (auto · light · dark) sits on the controls line. auto
 follows the OS; light or dark is remembered in this browser's localStorage
 and applied before first paint.
+
+## Scope (PR9.5: a second account set)
+
+The 200 largest accounts run low leverage: on 2026-09-15 none of them had a
+liq price within 5% of mark on any coin, so the 2% / 5% rows read "none".
+A probe of 100 accounts per ranking settled what to add:
+
+| Ranking (100 accounts) | liq prices ≤ 2% | ≤ 5% |
+| --- | --- | --- |
+| largest by account value | 0 | 0 |
+| ranks 200–1000 by value (sample) | 0 | 1 |
+| day volume ÷ equity, equity ≥ $50k | 1 | 6 |
+| **week volume ÷ equity, equity ≥ $100k** | **4** | **11** |
+
+Turnover ranks the leveraged, active traders; it kept paying down to rank
+400. The liq map now reads two sets:
+
+- **active** — the 300 accounts with the highest weekly volume ÷ account
+  value (equity at least $100k), polled every **120s**.
+- **largest** — the 200 largest by account value, polled every **600s**:
+  their liq prices sit far from mark and move slowly.
+
+Both come from the one leaderboard download (the cache keeps both rankings).
+The client takes `liqmap --set active|largest`. The sampler runs at most one
+liqmap at a time, so the two sets never burst the 1200/min REST weight
+together. Budget, from the documented weights: sampler ~520/min
+(`metaAndAssetCtxs` and `recentTrades` are weight 20+), board ~100/min while
+open, liq ~340/min (`clearinghouseState` is weight 2).
+
+Each finished poll appends one line per coin carrying both sets' latest
+snapshots, each with its own `asof_ms`, coverage and `interval_s`; an account
+in both sets keeps the newer poll's row. Rows drop `coin` (the file is per
+coin) and gain `set`. A restart resumes both sets from the file tail and does
+not re-poll a set that is still fresh. Flags: `--liq-interval` (active,
+default 120) and `--liq-largest-interval` (default 600).
+
+`/api/liq/<COIN>` adds `coverage.sets` with each set's `requested`,
+`fetched`, `capped`, `age_s` and `interval_s`; a PR9 line reads as the
+largest set. The card head shows both sets and flags either one that is
+capped or older than three of its own intervals.
+
+**Growth:** a BTC line is ~13 KB; four coins every 120s is roughly 25–30 MB
+a day. There is no retention on any `data/` file yet.
 
 ## How it watches
 

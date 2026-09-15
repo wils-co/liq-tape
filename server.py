@@ -20,7 +20,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, parse_qs
 
 HOST: str = "127.0.0.1"
@@ -98,10 +98,14 @@ LIQ_BIN_PCT: float = 0.25
 LIQ_NEAR_PCTS: Tuple[float, ...] = (2.0, 5.0)
 LIQ_TAIL_BYTES: int = 256 * 1024
 LIQ_METHOD_NOTE: str = (
-    "real liquidationPx from the largest accounts by account value · "
-    "Hyperliquid only · not modeled OI · not the whole market"
+    "real liquidationPx from two tracked account sets — largest by account "
+    "value, most active by weekly volume / equity · Hyperliquid only · "
+    "not modeled OI · not the whole market"
 )
 LIQ_YOUNG_NOTE: str = "no liq snapshot yet — sampler liqmap polls every 120s"
+# A PR9 line has no `sets`; it was the 200 largest accounts polled at 120s.
+LIQ_LEGACY_SET: str = "largest"
+LIQ_LEGACY_INTERVAL_S: float = 120.0
 
 # Lookback chips offered by the page, in seconds.
 LOOKBACKS: Dict[str, int] = {"15m": 900, "1h": 3600, "4h": 14400}
@@ -389,15 +393,23 @@ def cluster_liq(
     without a finite positive liq price are dropped, not guessed.
     """
     by_side: Dict[str, List[Tuple[float, float, str]]] = {"long": [], "short": []}
+    seen_addresses: Set[str] = set()
     for row in positions:
-        if not isinstance(row, dict) or row.get("coin") != coin:
+        # Per-coin files drop `coin` from rows (PR9.5); PR9 rows still carry it.
+        if not isinstance(row, dict) or row.get("coin", coin) != coin:
             continue
+        # One account holds one position per coin; a second row for the same
+        # address (an account in both sets) is the older poll's copy.
+        address = str(row.get("address") or "").lower()
+        if address:
+            if address in seen_addresses:
+                continue
+            seen_addresses.add(address)
         szi = _to_float(row.get("szi"))
         px = _to_float(row.get("liquidation_px"))
         if not szi or px is None or px <= 0:
             continue
         notional = abs(_to_float(row.get("position_value")) or 0.0)
-        address = str(row.get("address") or "").lower()
         by_side["long" if szi > 0 else "short"].append((px, notional, address))
 
     clusters: List[Dict[str, Any]] = []
@@ -482,12 +494,33 @@ def build_liq(data_dir: Path, coin: str, now: float) -> Dict[str, Any]:
     asof = float(snap["asof_ms"]) / 1000.0
     payload["asof"] = round(asof, 3)
     payload["age_s"] = round(now - asof, 1)
-    requested = snap.get("requested")
-    fetched = snap.get("fetched")
+    metas = snap.get("sets")
+    if not isinstance(metas, dict):
+        metas = {
+            LIQ_LEGACY_SET: {
+                "asof_ms": snap.get("asof_ms"),
+                "requested": snap.get("requested"),
+                "fetched": snap.get("fetched"),
+                "capped": snap.get("capped"),
+                "interval_s": LIQ_LEGACY_INTERVAL_S,
+            }
+        }
+    sets: Dict[str, Any] = {}
+    for name, meta in metas.items():
+        if not isinstance(meta, dict) or not isinstance(meta.get("asof_ms"), (int, float)):
+            continue
+        sets[name] = {
+            "requested": meta.get("requested"),
+            "fetched": meta.get("fetched"),
+            "capped": bool(meta.get("capped")),
+            "age_s": round(now - float(meta["asof_ms"]) / 1000.0, 1),
+            "interval_s": _to_float(meta.get("interval_s")),
+        }
     payload["coverage"] = {
-        "requested": requested,
-        "fetched": fetched,
+        "requested": snap.get("requested"),
+        "fetched": snap.get("fetched"),
         "capped": bool(snap.get("capped")),
+        "sets": sets,
     }
     positions = snap.get("positions") if isinstance(snap.get("positions"), list) else []
     clusters = cluster_liq(positions, coin)

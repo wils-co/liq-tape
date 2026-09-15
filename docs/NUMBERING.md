@@ -19,6 +19,7 @@ open a pull request against. Everything else has one.
 | PR7        | Walls, tape/CVD, layer chrome  | #7        |
 | PR8        | Panel ⑧ time × mark, one-screen layout | #8        |
 | PR9        | Real liq map (top 200 liquidationPx) | #9        |
+| PR9.5      | Second liq account set (active by turnover) | #10       |
 
 ## The offset
 
