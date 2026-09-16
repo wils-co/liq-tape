@@ -23,7 +23,7 @@ open a pull request against. Everything else has one.
 | —          | docs: architecture diagrams | #11       |
 | PR9.6      | Retention: archive rows older than 10 days | #12       |
 | PR10       | Swept vs standing liq clusters | #13       |
-| PR11       | Live trade tape (websocket) + honest CVD captions | #14       |
+| PR11       | Live trade tape (websocket) + honest CVD captions | #15       |
 
 ## The offset
 
