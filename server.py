@@ -78,13 +78,23 @@ WALL_MEDIAN_MULT: float = 1.5
 WALL_SHARE: float = 0.20
 WALL_MIN_LEVELS: int = 3
 
-# Cumulative signed sampled tape. Same lookbacks as prints; the file is
-# last-~10 prints per 12s poll, not a full tape — sampled: true says so.
+# Cumulative signed trade tape. Same lookbacks as prints. How complete the
+# file is depends on which path the sampler filled it from, which the board
+# cannot infer from the rows — they are the same shape either way — so it
+# reads the sampler's `tape_source.json` sidecar. On the websocket path this
+# is every print and the dollar value means what it says; on the REST
+# fallback it is the last ~10 prints per 12s poll, which tracks direction but
+# understates magnitude badly (measured 9x on a quiet tape).
 DEFAULT_CVD_LOOKBACK: str = "1h"
 CVD_SERIES_CAP: int = 240
-CVD_YOUNG_NOTE: str = (
-    "cvd needs the sampler to accumulate — sampled tape (last ~10/poll)"
-)
+CVD_YOUNG_NOTE: str = "cvd needs the sampler to accumulate"
+TAPE_SOURCE_FILE: str = "tape_source.json"
+TAPE_SOURCE_TTL: float = 5.0
+TAPE_METHODS: Dict[str, str] = {
+    "websocket": "full tape · every print via the live trades socket",
+    "rest": "sampled tape (last ~10/poll) · direction only, magnitude understated",
+    "unknown": "tape completeness unknown — sampler predates tape_source.json",
+}
 
 # Mark path for panel ⑧: the sampler's 12s mark over the same lookbacks.
 # 4h is ~1200 rows; the cap keeps the payload near what one panel can draw.
@@ -1204,6 +1214,30 @@ def _downsample_series(
     return out
 
 
+_TAPE_SOURCE_CACHE: Dict[str, Any] = {"at": 0.0, "mode": "unknown"}
+
+
+def read_tape_source(data_dir: Path, now: float) -> str:
+    """Which path the sampler is filling the trades files from, cached briefly.
+
+    A missing sidecar means a sampler older than this feature, not an error:
+    reported as `unknown` so the caption stays honest instead of guessing.
+    """
+    if now - float(_TAPE_SOURCE_CACHE["at"]) < TAPE_SOURCE_TTL:
+        return str(_TAPE_SOURCE_CACHE["mode"])
+    mode = "unknown"
+    try:
+        with open(data_dir / TAPE_SOURCE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict) and raw.get("mode") in TAPE_METHODS:
+            mode = str(raw["mode"])
+    except (OSError, ValueError):
+        mode = "unknown"
+    _TAPE_SOURCE_CACHE["at"] = now
+    _TAPE_SOURCE_CACHE["mode"] = mode
+    return mode
+
+
 def build_cvd(
     data_dir: Path,
     coin: str,
@@ -1211,7 +1245,7 @@ def build_cvd(
     now: float,
     max_lines: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Cumulative signed notional of the sampled tape over one lookback.
+    """Cumulative signed notional of the trade tape over one lookback.
 
     Side ``B`` adds ``px*sz``, side ``A`` subtracts. px/sz arrive as strings
     on the jsonl and leave as floats. Missing file is empty + note, not 404.
@@ -1220,10 +1254,15 @@ def build_cvd(
     cutoff_ms = (now - window) * 1000.0
     path = data_dir / f"trades_{coin}.jsonl"
 
+    tape_mode = read_tape_source(data_dir, now)
     payload: Dict[str, Any] = {
         "coin": coin,
         "lookback": lookback,
-        "sampled": True,
+        # Kept for clients that read it; now it reports reality rather than
+        # always claiming a sampled tape.
+        "sampled": tape_mode != "websocket",
+        "tape": tape_mode,
+        "method": TAPE_METHODS[tape_mode],
         "cvd": {"latest": None, "series": []},
         "count": 0,
         "truncated": False,
