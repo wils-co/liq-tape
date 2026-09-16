@@ -44,6 +44,8 @@ Options:
 - `--data-dir <path>`: Directory where `.jsonl` files are stored (default: `data/`)
 - `--coins <COIN1,COIN2,...>`: Comma-separated list of coins (default: `BTC,ETH,HYPE,SOL`)
 - `--client <path>`: Path to `hyperliquid_client.py`
+- `--no-ws`: Skip the live trade stream; take the tape from the REST tail only (PR11)
+- `--ws-url <url>`: Trade stream endpoint (default: `wss://api.hyperliquid.xyz/ws`)
 - `--no-liq`: Skip the background liqmap poll (PR9)
 - `--liq-interval <seconds>`: Seconds between polls of the active account set (default: `120`)
 - `--liq-largest-interval <seconds>`: Seconds between polls of the largest account set (default: `600`)
@@ -198,6 +200,10 @@ labelled with notional. Tagged on `GET /api/l2/<COIN>` so the existing 2s
 cache is the only book fetch.
 
 ### CVD
+**Superseded by PR11** on tape completeness: `sampled` is no longer always
+true, and the dollar figure is real on the websocket path. The endpoint shape
+below is otherwise unchanged.
+
 `GET /api/cvd/<COIN>?lookback=15m|1h|4h` (default `1h`) walks the trades
 file, converts px/sz to floats on the server, and accumulates signed
 notional: side `B` adds, side `A` subtracts. Payload is `sampled: true`, a
@@ -405,6 +411,57 @@ with a ring where the mark crossed it; it is not in the right-edge strip,
 which stays standing size. The card adds a **swept 30m** row and lists the
 three newest swept clusters in grey, struck through, as "was $X · 4m ago".
 Nothing here says what price will do next.
+
+## Scope (PR11: live trade tape)
+
+Plain-language version, including what the old numbers were worth:
+[docs/trade-tape.md](docs/trade-tape.md).
+
+`recentTrades` returns a fixed **10 rows per call** and ignores `n` / `limit`
+— verified against the endpoint, and the client's own help string says so. A
+fixed row count means the wall-clock it covers shrinks as the tape speeds up,
+so the sampler saw least when the most was happening.
+
+Measured 2026-09-17, 90s head to head on a **quiet** BTC tape: the REST poller
+caught **73 of 271 trades (27%)** and **21% of notional**, reporting a net CVD
+of **−$30k** against a true **−$275k**. Direction held; magnitude was **9x**
+off. Over 75s the REST path wrote 70 BTC rows, the socket wrote 356.
+
+### The stream
+One websocket connection (`wss://api.hyperliquid.xyz/ws`) carries a `trades`
+subscription per coin. Rows are slimmed to the same `TRADE_FIELDS` and written
+to the same `trades_<COIN>.jsonl` through the same per-coin `TidGate`, so
+nothing downstream changed — the board already deduped by `tid`.
+
+Keepalive is a `{"method":"ping"}` every 25s; Hyperliquid drops connections
+idle past ~60s. A socket with no frames either way for 70s is treated as dead
+and redialled.
+
+### Fallback
+While the socket is acked and live, the main loop **skips its REST trade poll
+entirely** — four fewer subprocesses a tick. The moment it drops, the REST
+tail takes back over on the next tick and the panel degrades to its old
+behaviour rather than going blank. Reconnect backs off 1s → 60s. Because both
+paths share one `TidGate`, an overlapping row is written once.
+
+`websocket-client` is a soft dependency: if it is missing the sampler logs one
+line and runs REST-only.
+
+### Honest captions
+The board cannot tell a socket row from a REST row — same shape — so the
+sampler writes `data/tape_source.json` (`{"mode": "websocket"|"rest"}`) on
+start and on every change. `GET /api/cvd/<COIN>` reads it and reports:
+
+- `tape`: `websocket` | `rest` | `unknown`
+- `sampled`: now **false** on the websocket path, not hardcoded true
+- `method`: the caption string for that mode
+
+`unknown` means a sampler older than this PR, reported rather than guessed.
+
+**Not done here:** `index.html` still hardcodes `sampled tape (last ~10/poll)`
+in its methodology line (lines ~349 and ~494). It should read `tape` /
+`method` off the CVD payload. Left alone because the file had uncommitted
+work in it.
 
 ## How it watches
 

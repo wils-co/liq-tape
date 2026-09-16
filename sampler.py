@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""liq-tape OI, mark, and recent-trades sampler.
+"""liq-tape OI, mark, and trade-tape sampler.
 
-Polls the official Hyperliquid client helper for perpetual market contexts
-and the last handful of trades, appending to per-coin jsonl files.
-Read-only: no order execution, no credentials, no signal generation.
+Polls the official Hyperliquid client helper for perpetual market contexts,
+and takes the trade tape from a live websocket subscription (falling back to
+the client's REST tail when the socket is down), appending to per-coin jsonl
+files. Read-only: no order execution, no credentials, no signal generation.
 """
 
 import argparse
@@ -33,6 +34,27 @@ DEFAULT_DATA_DIR: Path = BASE_DIR / "data"
 TID_CAP: int = 2000
 TID_TAIL_BYTES: int = 256 * 1024
 TRADES_TIMEOUT: float = 8.0
+# Live tape. `recentTrades` returns a fixed 10 rows per call, so the
+# wall-clock it covers shrinks as the tape speeds up — it samples least when
+# the most is happening. Measured 2026-09-17, 90s head to head against this
+# socket on a *quiet* BTC tape: the REST poller caught 73 of 271 trades (27%)
+# and 21% of notional, and reported a net delta of -$30k against a true
+# -$275k. Direction survived; magnitude was 9x off. The socket delivers every
+# print, so CVD becomes a number you can read in dollars rather than a shape.
+WS_URL: str = "wss://api.hyperliquid.xyz/ws"
+# Hyperliquid drops a connection idle past ~60s. Ping well inside that; the
+# server answers on the `pong` channel and any frame counts as liveness.
+WS_PING_S: float = 25.0
+# recv() wakes this often to service the ping clock and the stop flag.
+WS_RECV_TIMEOUT_S: float = 5.0
+# A socket that has gone quiet in both directions is treated as dead and
+# reconnected, which also hands coverage back to the REST fallback.
+WS_STALE_S: float = 70.0
+WS_BACKOFF_MIN_S: float = 1.0
+WS_BACKOFF_MAX_S: float = 60.0
+WS_CONNECT_TIMEOUT_S: float = 15.0
+# Sidecar the board reads so the CVD caption matches how the rows arrived.
+TAPE_SOURCE_FILE: str = "tape_source.json"
 # Fields the panel actually reads. `users` is ~40% of each row and nothing
 # consumes it; existing files keep old rows, this is append-forward.
 TRADE_FIELDS: Tuple[str, ...] = ("coin", "side", "px", "sz", "time", "hash", "tid")
@@ -87,23 +109,31 @@ def _to_float(val: Any) -> Optional[float]:
 
 
 class TidGate:
-    """Bounded set of recently seen trade ids. Oldest dropped first."""
+    """Bounded set of recently seen trade ids. Oldest dropped first.
+
+    Locked: the websocket thread and the REST fallback in the main loop share
+    one gate per coin, which is what makes the fallback safe. Either path may
+    write a row the other already wrote; whoever gets there first wins and the
+    duplicate is dropped.
+    """
 
     def __init__(self, cap: int = TID_CAP) -> None:
         self._cap = cap
         self._order: Deque[int] = deque()
         self._seen: Set[int] = set()
+        self._lock = threading.Lock()
 
     def add(self, tid: int) -> bool:
         """Record ``tid``. Return True only the first time it is seen."""
-        if tid in self._seen:
-            return False
-        self._seen.add(tid)
-        self._order.append(tid)
-        while len(self._order) > self._cap:
-            old = self._order.popleft()
-            self._seen.discard(old)
-        return True
+        with self._lock:
+            if tid in self._seen:
+                return False
+            self._seen.add(tid)
+            self._order.append(tid)
+            while len(self._order) > self._cap:
+                old = self._order.popleft()
+                self._seen.discard(old)
+            return True
 
 
 def _trade_tid(rec: Dict[str, Any]) -> Optional[int]:
@@ -156,6 +186,25 @@ def load_tid_gate(path: Path) -> TidGate:
         if tid is not None:
             gate.add(tid)
     return gate
+
+
+def write_tape_source(data_dir: Path, mode: str, ts: float) -> None:
+    """Record which path is currently filling the trades files.
+
+    The board cannot tell a websocket row from a REST row — they are the same
+    shape — so it reads this sidecar to caption CVD honestly. Written on start
+    and on every change, so a socket outage shows up as `rest` while it lasts
+    rather than leaving the panel claiming a full tape it no longer has.
+    """
+    path = data_dir / TAPE_SOURCE_FILE
+    payload = {"mode": mode, "since": round(ts, 3)}
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(data_dir), prefix=".tape_source.")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except OSError as exc:
+        _log(f"could not write {TAPE_SOURCE_FILE}: {exc}")
 
 
 def slim_trade(trade: Dict[str, Any]) -> Dict[str, Any]:
@@ -218,6 +267,187 @@ def fetch_recent_trades(client_path: Path, coin: str) -> List[Dict[str, Any]]:
     else:
         rows = []
     return [row for row in rows if isinstance(row, dict)]
+
+
+class TradeStream:
+    """Live `trades` websocket feed — the full tape, not the last 10 rows.
+
+    One connection carries every coin. Rows land in the same
+    ``trades_<coin>.jsonl`` files, in the same slimmed shape, through the same
+    per-coin ``TidGate`` the REST poller uses, so nothing downstream changes:
+    the board already dedupes by ``tid`` and reads these files as they are.
+
+    Degradation is the point. While the socket is up, ``covering()`` is True
+    and the main loop skips its REST trade poll. The moment the socket drops,
+    ``covering()`` goes False and the REST tail takes back over on the next
+    tick — the panel falls back to its old behaviour rather than going blank.
+    """
+
+    def __init__(
+        self,
+        coins: List[str],
+        data_dir: Path,
+        gates: Dict[str, TidGate],
+        url: str = WS_URL,
+    ) -> None:
+        self.coins = list(coins)
+        self.data_dir = data_dir
+        self.gates = gates
+        self.url = url
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._connected = False
+        self._last_rx = 0.0
+        self._acked: Set[str] = set()
+        self._rows = 0
+        self._reconnects = 0
+
+    # -- lifecycle -----------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._supervise, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=WS_RECV_TIMEOUT_S + 2.0)
+
+    def covering(self) -> bool:
+        """True when the socket is carrying the tape and the REST poll can idle."""
+        with self._lock:
+            if not self._connected:
+                return False
+            if not self._acked:
+                return False
+            return (time.time() - self._last_rx) < WS_STALE_S
+
+    def stats(self) -> Tuple[int, int, bool]:
+        with self._lock:
+            return self._rows, self._reconnects, self._connected
+
+    # -- internals -----------------------------------------------------
+
+    def _supervise(self) -> None:
+        """Reconnect with exponential backoff until stopped."""
+        backoff = WS_BACKOFF_MIN_S
+        while self._running:
+            try:
+                self._session()
+                backoff = WS_BACKOFF_MIN_S
+            except Exception as exc:
+                if self._running:
+                    _log(f"trade stream error: {exc}")
+            finally:
+                with self._lock:
+                    self._connected = False
+                    self._acked.clear()
+            if not self._running:
+                break
+            with self._lock:
+                self._reconnects += 1
+            # Interruptible backoff so shutdown does not wait out the sleep.
+            target = time.time() + backoff
+            while self._running and time.time() < target:
+                time.sleep(min(0.2, max(0.0, target - time.time())))
+            backoff = min(WS_BACKOFF_MAX_S, backoff * 2.0)
+
+    def _session(self) -> None:
+        import websocket  # optional dependency; absence disables the stream
+
+        ws = websocket.create_connection(self.url, timeout=WS_CONNECT_TIMEOUT_S)
+        try:
+            ws.settimeout(WS_RECV_TIMEOUT_S)
+            for coin in self.coins:
+                ws.send(
+                    json.dumps(
+                        {
+                            "method": "subscribe",
+                            "subscription": {"type": "trades", "coin": coin},
+                        }
+                    )
+                )
+            now = time.time()
+            with self._lock:
+                self._connected = True
+                self._last_rx = now
+            next_ping = now + WS_PING_S
+
+            while self._running:
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    raw = None
+                if raw:
+                    with self._lock:
+                        self._last_rx = time.time()
+                    self._handle(raw)
+                now = time.time()
+                if now >= next_ping:
+                    ws.send(json.dumps({"method": "ping"}))
+                    next_ping = now + WS_PING_S
+                # Nothing either way for a full idle window: assume the socket
+                # is a zombie, drop it, and let the supervisor redial.
+                with self._lock:
+                    stale = (now - self._last_rx) > WS_STALE_S
+                if stale:
+                    raise RuntimeError("no frames within the idle window")
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def _handle(self, raw: Any) -> None:
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return
+        try:
+            msg = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(msg, dict):
+            return
+        channel = msg.get("channel")
+        if channel == "subscriptionResponse":
+            data = msg.get("data")
+            sub = data.get("subscription") if isinstance(data, dict) else None
+            coin = sub.get("coin") if isinstance(sub, dict) else None
+            if isinstance(coin, str):
+                with self._lock:
+                    self._acked.add(coin)
+            return
+        if channel != "trades":
+            return
+        rows = msg.get("data")
+        if not isinstance(rows, list):
+            return
+
+        # One message can carry prints for one coin only, but group anyway —
+        # it keeps the append per file to a single locked write.
+        batched: Dict[str, List[str]] = {}
+        for trade in rows:
+            if not isinstance(trade, dict):
+                continue
+            coin = trade.get("coin")
+            if coin not in self.gates:
+                continue
+            tid = _trade_tid(trade)
+            if tid is None:
+                continue
+            if self.gates[coin].add(tid):
+                batched.setdefault(coin, []).append(json.dumps(slim_trade(trade)) + "\n")
+        for coin, lines in batched.items():
+            append_lines(self.data_dir / f"trades_{coin}.jsonl", lines)
+            with self._lock:
+                self._rows += len(lines)
 
 
 def fetch_markets(client_path: Path) -> Dict[str, Any]:
@@ -621,6 +851,16 @@ def parse_args() -> argparse.Namespace:
         help="Do not poll liquidation prices (liqmap)",
     )
     parser.add_argument(
+        "--no-ws",
+        action="store_true",
+        help="Do not stream the live trade tape; use the REST tail only (last ~10 per poll)",
+    )
+    parser.add_argument(
+        "--ws-url",
+        default=WS_URL,
+        help=f"Trade stream websocket endpoint (default: {WS_URL})",
+    )
+    parser.add_argument(
         "--liq-interval",
         type=float,
         default=DEFAULT_LIQ_INTERVAL,
@@ -671,6 +911,20 @@ def main() -> None:
             LIQ_TIMEOUT,
         )
 
+    # The stream shares tid_gates with the REST fallback below, so a row that
+    # arrives on both paths is written once. Missing websocket-client is not
+    # fatal: the sampler logs it and keeps the REST tail.
+    stream: Optional[TradeStream] = None
+    if not args.no_ws:
+        try:
+            import websocket  # noqa: F401  (probe only; TradeStream re-imports)
+
+            stream = TradeStream(coins, data_dir, tid_gates, args.ws_url)
+            stream.start()
+        except ImportError:
+            _log("websocket-client not installed; trade tape falls back to the REST tail")
+            stream = None
+
     retention: Optional[Retention] = None
     if args.retain_days > 0:
         retention = Retention(data_dir, args.retain_days, time.time())
@@ -683,9 +937,15 @@ def main() -> None:
     print(
         f"liq-tape sampler started | coins: {', '.join(coins)} | interval: {interval}s | data: {data_dir}"
         f" | liq: {liq_desc}"
+        f" | tape: {'REST tail (last ~10/poll)' if stream is None else 'live websocket, REST fallback'}"
         f" | retain: {'off' if retention is None else f'{args.retain_days}d live, older archived'}",
         flush=True,
     )
+
+    # Starts on the fallback path by definition: the socket has not acked a
+    # subscription yet. Flips to `websocket` on the first covered tick.
+    tape_mode: str = "rest"
+    write_tape_source(data_dir, tape_mode, time.time())
 
     while running:
         loop_start = time.time()
@@ -730,8 +990,18 @@ def main() -> None:
 
             # Trades run after every OI write, concurrently, so four hung
             # endpoints cost one timeout rather than four sequential ones.
-            fetched = fetch_trades_for_coins(client_path, written)
-            for coin in written:
+            # Skipped entirely while the socket is carrying the tape; this is
+            # the fallback path, and it costs four subprocesses a tick.
+            covering = stream is not None and stream.covering()
+            mode = "websocket" if covering else "rest"
+            if mode != tape_mode:
+                tape_mode = mode
+                write_tape_source(data_dir, mode, time.time())
+                if stream is not None:
+                    _log(f"trade tape now on the {mode} path")
+            needs_rest = [] if covering else written
+            fetched = fetch_trades_for_coins(client_path, needs_rest)
+            for coin in needs_rest:
                 trades, trades_exc = fetched[coin]
                 if trades_exc is not None:
                     now_str = datetime.datetime.now().isoformat()
@@ -763,6 +1033,10 @@ def main() -> None:
         while running and time.time() < target_wake:
             time.sleep(min(0.2, max(0.0, target_wake - time.time())))
 
+    if stream is not None:
+        rows, reconnects, _ = stream.stats()
+        stream.stop()
+        _log(f"trade stream stopped after {rows} rows, {reconnects} reconnects")
     if liq is not None:
         liq.stop()
     if retention is not None:
