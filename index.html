@@ -139,7 +139,23 @@
   }
   .chips .cover { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; margin-left: 2px; }
   .chips .cover.flag { color: var(--amber); }
-  .method { margin: 4px 0 12px; font-size: 12px; color: var(--faint); line-height: 1.5; }
+  /* The controls stay reachable while reading down the board: coin, price,
+     layers, lookback and theme ride along, so changing the lookback does not
+     mean scrolling back up first. The negative margin swallows .wrap's top
+     padding, otherwise a sliver of board would show above the bar once stuck.
+     The methodology line is deliberately left outside and scrolls away — it
+     is reference text, not a control, and it would cost 20px of every screen.
+     Opaque background, or the board reads through it. */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    background: var(--paper);
+    padding: 16px 0 8px; margin: -16px 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  /* A short viewport cannot spare ~80px of fixed chrome; give the height back. */
+  @media (max-height: 520px) { .topbar { position: static; } }
+
+  .method { margin: 8px 0 12px; font-size: 12px; color: var(--faint); line-height: 1.5; }
 
   .panel { position: relative; background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 12px; }
   svg { display: block; width: 100%; height: auto; margin: 0 auto; }
@@ -282,6 +298,15 @@
   .trow span:nth-child(3), .trow span:nth-child(4) { text-align: right; }
   .trow.bid span:nth-child(2) { color: var(--green); }
   .trow.ask span:nth-child(2) { color: var(--red); }
+  /* The side letter sits in an 18px column with the price and notional
+     pushed to the right edge, so at a glance the tape was a wall of
+     identical rows — one character, a long way from everything else.
+     Ask-taker rows take the book's own ask fill as a band across the whole
+     row, so the side reads from the row, not from finding the letter.
+     Only one side is banded: an eye finds the odd row out faster than it
+     separates two tints, and presence-vs-absence survives a colour vision
+     deficiency in a way red-vs-green does not. */
+  .trow.ask { background: var(--ask-fill); }
 
   /* Below the fold: ⑤ ⑥ ⑦ share one row. Flex rather than a 3-column grid so
      a hidden panel (no levels for this coin, profile chip off) gives its
@@ -325,6 +350,7 @@
 <body>
 <div class="wrap">
 
+  <div class="topbar">
   <header>
     <h1>liq-tape <span>time × mark · OI × price · L2 · prints · funding · volume</span></h1>
     <div class="toggle" id="coins" role="group" aria-label="coin">
@@ -365,7 +391,8 @@
       <button type="button" data-theme-choice="dark" aria-pressed="false">dark</button>
     </div>
   </div>
-  <p class="method" id="layer-method">HL only · sampled tape (last ~10/poll) · not a full book · liq: real liquidationPx from the largest and most active accounts, not modeled OI · swept = crossed by the 12s mark · stops / tp need a later PR</p>
+  </div>
+  <p class="method" id="layer-method">HL only · <span id="lm-tape">tape</span> · not a full book · liq: real liquidationPx from the largest and most active accounts, not modeled OI · swept = crossed by the 12s mark · stops / tp need a later PR</p>
 
   <div class="board">
 
@@ -508,10 +535,12 @@
     funding is the exchange's published hourly rate and premium. The levels are yours, read from
     <code>levels.yaml</code> and drawn exactly as written — nothing here detects, ranks, or edits
     them. The volume profile is 15m candles bucketed by price, not a tick tape; notable prints are
-    large recent trades the sampler caught, not a complete flow. Walls are resting size at
+    large recent trades the sampler caught, filtered by notional. Walls are resting size at
     or above 1.5× the median notional of that side of the book, or 20% of that side's
-    visible notional. CVD is the cumulative signed sampled tape (last ~10 prints per poll),
-    not a full book. Panel ⑧ is the sampler's 12s mark over the lookback; wall lines on it
+    visible notional. CVD is the cumulative signed trade tape: every print while the
+    sampler holds its live socket, and the last ~10 prints per 12s poll while it is
+    falling back to REST — which tracks direction but understates magnitude. Which
+    one you are looking at is on the CVD tile. Panel ⑧ is the sampler's 12s mark over the lookback; wall lines on it
     are scaled to the largest wall on screen. Its right edge carries volume at price and,
     beside it, liquidation notional at price. Liq bands are the exchange's own
     <code>liquidationPx</code> for open positions in two tracked account sets: the 300 most
@@ -974,12 +1003,26 @@
     el("cvd-count").textContent = data && typeof data.count === "number" ? String(data.count) : "—";
 
     var note = el("cvd-note");
-    var parts = ["sampled"];
+    // Completeness is no longer a constant. The sampler takes the tape from a
+    // live socket when it can and falls back to the 10-per-poll REST tail when
+    // the socket is down, so the caption reads `tape` off the payload rather
+    // than always claiming a sampled tape. `unknown` means a sampler older
+    // than that field, which is reported rather than guessed at.
+    var tape = data && data.tape;
+    var parts = [tape === "websocket" ? "full tape"
+      : tape === "rest" ? "sampled"
+      : tape === "unknown" ? "completeness unknown"
+      : "sampled"];
     if (data && data.error) parts = ["unavailable"];
     else if (data && data.window_capped) parts.push("window capped");
     else if (data && data.truncated) parts.push("truncated");
     else if (data && data.note && !series.length) parts.push("accumulating");
     note.textContent = parts.join(" · ");
+    el("lm-tape").textContent = tape === "websocket"
+      ? "full tape · every print via the live socket"
+      : tape === "rest"
+        ? "sampled tape (last ~10/poll) · direction only"
+        : "tape completeness unknown";
     note.className = (data && data.error)
       ? "note bad"
       : (data && (data.truncated || data.window_capped) ? "note flag" : "note");
