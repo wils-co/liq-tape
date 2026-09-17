@@ -23,6 +23,10 @@ levels:
   ETH:
     - {price: 2663, label: "swept pool", kind: pool}
     - {price: 2500, label: "base", kind: base}
+    - {price: 2410, label: "ask wall ($41M, 750 orders)", kind: pool}
+    - {price: 2363.9, label: "$30M whale pool", kind: pool}
+    - {price: 2350, label: "bid pocket top ($121M shelf)", kind: base}
+    - {price: 2300, label: "bid pocket floor", kind: base}
   HYPE:
     - {price: 80.108, label: "offer pocket", kind: pool}
     - {price: 80.087, label: "bid ladder bottom", kind: base}
