@@ -27,6 +27,9 @@
     --ask-fill: rgba(185, 28, 28, 0.14);
     --wall-bid-fill: rgba(21, 128, 61, 0.38);
     --wall-ask-fill: rgba(185, 28, 28, 0.34);
+    /* print markers: colour-blind-safe pair (blue/orange) + shape coding */
+    --print-b: #2563eb;   /* bid-taker — blue, triangle */
+    --print-a: #ea580c;   /* ask-taker — orange, square */
     --veil: rgba(251, 250, 248, 0.88);
     /* Liq sides get their own hues so a band is never read as a bid/ask wall. */
     --liq-long: #6d28d9;
@@ -53,6 +56,9 @@
       --ask-fill: rgba(239, 68, 68, 0.16);
       --wall-bid-fill: rgba(34, 197, 94, 0.42);
       --wall-ask-fill: rgba(239, 68, 68, 0.38);
+      /* print markers: dark-mode variants of the colour-blind-safe pair */
+      --print-b: #60a5fa;   /* bid-taker — light blue, triangle */
+      --print-a: #fb923c;   /* ask-taker — light orange, square */
       --veil: rgba(19, 19, 17, 0.88);
       --liq-long: #a78bfa;
       --liq-short: #22d3ee;
@@ -74,6 +80,9 @@
     --ask-fill: rgba(239, 68, 68, 0.16);
     --wall-bid-fill: rgba(34, 197, 94, 0.42);
     --wall-ask-fill: rgba(239, 68, 68, 0.38);
+    /* print markers: dark-mode variants of the colour-blind-safe pair */
+    --print-b: #60a5fa;   /* bid-taker — light blue, triangle */
+    --print-a: #fb923c;   /* ask-taker — light orange, square */
     --veil: rgba(19, 19, 17, 0.88);
     --liq-long: #a78bfa;
     --liq-short: #22d3ee;
@@ -1383,9 +1392,11 @@
       if (typeof p.px !== "number" || !isFinite(p.px)) continue;
       var py = yOf(p.px);
       if (py < y0 - 6 || py > y1 + 6) continue;
-      var col = p.side === "A" ? "var(--red)" : p.side === "B" ? "var(--green)" : "var(--ink)";
-      s += line(x0 - 7, py, x0, py, col, 1.5);
-      s += '<circle cx="' + x0 + '" cy="' + py.toFixed(2) + '" r="2.2" fill="' + col + '" />';
+      var col = p.side === "A" ? "var(--print-a)" : p.side === "B" ? "var(--print-b)" : "var(--ink)";
+      var marker = p.side === "A"
+        ? '<rect x="' + (x0 - 3) + '" y="' + (py - 3).toFixed(2) + '" width="6" height="6" fill="' + col + '" />'
+        : '<path d="M ' + x0 + ' ' + (py - 4).toFixed(2) + ' l 4 7 l -8 0 z" fill="' + col + '" />';
+      s += marker;
       if (p.near && p.near.length) {
         var clash = nearYs.some(function (y) { return Math.abs(py - y) < 12; });
         if (!clash) {
@@ -1400,8 +1411,8 @@
     s += text((x0 + x1) / 2, PF.H - 14,
       "volume at price · each 15m bar split evenly across its high–low span",
       { size: 10, fill: "var(--faint)" });
-    s += text(x0 + 10, y0 + 12, "bid-taker", { size: 9, anchor: "start", fill: "var(--green)" });
-    s += text(x0 + 78, y0 + 12, "ask-taker", { size: 9, anchor: "start", fill: "var(--red)" });
+    s += text(x0 + 10, y0 + 12, "▲ bid-taker", { size: 9, anchor: "start", fill: "var(--print-b)" });
+    s += text(x0 + 78, y0 + 12, "■ ask-taker", { size: 9, anchor: "start", fill: "var(--print-a)" });
 
     el("profile").innerHTML = s;
 
